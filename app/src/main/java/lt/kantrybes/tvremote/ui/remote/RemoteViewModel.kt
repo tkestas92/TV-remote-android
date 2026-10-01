@@ -3,12 +3,10 @@ package lt.kantrybes.tvremote.ui.remote
 import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,11 +17,16 @@ import kotlinx.coroutines.sync.withLock
 import lt.kantrybes.tvremote.R
 import lt.kantrybes.tvremote.TvRemoteApplication
 import lt.kantrybes.tvremote.data.adb.AppLauncher
+import lt.kantrybes.tvremote.data.adb.PictureController
+import lt.kantrybes.tvremote.data.adb.PictureMenu
 import lt.kantrybes.tvremote.data.adb.TextSync
 import lt.kantrybes.tvremote.data.remote.RemoteConnectionState
 import lt.kantrybes.tvremote.data.remote.KeyPress
 import lt.kantrybes.tvremote.data.remote.TvKey
 import lt.kantrybes.tvremote.data.settings.AppShortcut
+import lt.kantrybes.tvremote.data.settings.ControlMode
+import lt.kantrybes.tvremote.data.settings.PictureSlider
+import lt.kantrybes.tvremote.data.settings.PictureSliderPref
 import lt.kantrybes.tvremote.data.settings.SettingsRepository
 import lt.kantrybes.tvremote.data.settings.Shortcuts
 import java.io.IOException
@@ -38,14 +41,9 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
     private val app = application as TvRemoteApplication
     private val settings = SettingsRepository(application)
     private val remote = app.remote
-    private val launcher = AppLauncher(app.adb)
+    private val launcher = AppLauncher(app.adb, settings)
+    private val openingTicket = java.util.concurrent.atomic.AtomicInteger(0)
     private val launches = Mutex()
-    private var screenVisible = false
-    private val processObserver = object : DefaultLifecycleObserver {
-        override fun onStart(owner: LifecycleOwner) {
-            if (screenVisible) warmAdb()
-        }
-    }
 
     val connection: StateFlow<RemoteConnectionState> = remote.state
 
@@ -54,6 +52,18 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
 
     private val _showPictureMenu = MutableStateFlow(true)
     val showPictureMenu: StateFlow<Boolean> = _showPictureMenu.asStateFlow()
+
+    private val _controlMode = MutableStateFlow(ControlMode.DPAD)
+    val controlMode: StateFlow<ControlMode> = _controlMode.asStateFlow()
+
+    private val _pictureSliders = MutableStateFlow(defaultPictureSliders())
+    val pictureSliders: StateFlow<List<PictureSliderPref>> = _pictureSliders.asStateFlow()
+    private val pictureLock = Mutex()
+    private val pictureApplies = mutableMapOf<String, Int>()
+    private val pictures = PictureController { command ->
+        val host = settings.read().pairedHost
+        launcher.exec(host, command)
+    }
 
     private val _adbMessage = MutableStateFlow<AdbMessage?>(null)
     val adbMessage: StateFlow<AdbMessage?> = _adbMessage.asStateFlow()
@@ -75,23 +85,35 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
     }
 
     init {
-        ProcessLifecycleOwner.get().lifecycle.addObserver(processObserver)
         launchGuarded {
             settings.shortcuts().collect { _shortcuts.value = it }
         }
         launchGuarded {
+            settings.migrateControlMode()
+            settings.controlMode().collect { _controlMode.value = it }
+        }
+        launchGuarded {
             settings.showPictureMenuButton().collect { _showPictureMenu.value = it }
+        }
+        launchGuarded {
+            settings.pictureSliders().collect { stored ->
+                _pictureSliders.value = stored.map { slider ->
+                    if ((pictureApplies[slider.item] ?: 0) > 0) {
+                        val current = _pictureSliders.value.firstOrNull { it.item == slider.item }
+                        if (current != null) slider.copy(value = current.value) else slider
+                    } else {
+                        slider
+                    }
+                }
+            }
         }
     }
 
     fun start() {
-        screenVisible = true
         remote.ensureRunning()
-        warmAdb()
     }
 
     fun stop() {
-        screenVisible = false
         remote.stop()
     }
 
@@ -100,11 +122,13 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun launchShortcut(shortcut: AppShortcut) {
+        val opening = getApplication<Application>().getString(R.string.shortcut_opening, shortcut.label)
+        val ticket = openingTicket.incrementAndGet()
+        _adbMessage.value = AdbMessage(opening, waiting = true)
         launchGuarded {
-            if (!launches.tryLock()) return@launchGuarded
-            try {
+            launches.withLock {
                 val host = settings.read().pairedHost
-                launcher.launch(
+                val launched = launcher.launch(
                     shortcut = shortcut,
                     host = host,
                     supportsAppLinks = settings.supportsAppLinks(host),
@@ -117,13 +141,9 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
                         _adbMessage.value = AdbMessage(failedText(), waiting = false)
                     },
                 )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                Log.e(TAG, "Shortcut launch failed", error)
-                _adbMessage.value = AdbMessage(failedText(), waiting = false)
-            } finally {
-                launches.unlock()
+                if (launched && openingTicket.get() == ticket) {
+                    _adbMessage.value = null
+                }
             }
         }
     }
@@ -214,6 +234,36 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
+    fun setPictureValue(item: String, value: Int) {
+        if (!PictureSlider.isItem(item)) return
+        val clamped = value.coerceIn(0, 100)
+        val previous = _pictureSliders.value.firstOrNull { it.item == item }?.value ?: clamped
+        pictureApplies[item] = (pictureApplies[item] ?: 0) + 1
+        restorePictureValue(item, clamped)
+        launchGuarded {
+            try {
+                pictureLock.withLock {
+                    settings.setPictureValue(item, clamped)
+                    val applied = pictures.set(item, clamped)
+                    if (!applied) {
+                        settings.setPictureValue(item, previous)
+                        restorePictureValue(item, previous)
+                        _adbMessage.value = AdbMessage(pictureFailedText(), waiting = false)
+                    }
+                }
+            } finally {
+                val remaining = (pictureApplies[item] ?: 1) - 1
+                if (remaining <= 0) pictureApplies.remove(item) else pictureApplies[item] = remaining
+            }
+        }
+    }
+
+    private fun restorePictureValue(item: String, value: Int) {
+        _pictureSliders.value = _pictureSliders.value.map { slider ->
+            if (slider.item == item) slider.copy(value = value) else slider
+        }
+    }
+
     fun openPictureMenu() {
         launchGuarded {
             val host = settings.read().pairedHost
@@ -232,24 +282,8 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
         launchGuarded { settings.setShortcut(index, shortcut) }
     }
 
-    private fun warmAdb() {
-        launchGuarded {
-            val host = settings.read().pairedHost
-            launcher.ensureConnected(
-                host = host,
-                onWaiting = { _adbMessage.value = AdbMessage(allowText(), waiting = true) },
-                onClear = { _adbMessage.value = null },
-                onError = { _adbMessage.value = AdbMessage(failedText(), waiting = false) },
-            )
-        }
-    }
-
-    override fun onCleared() {
-        ProcessLifecycleOwner.get().lifecycle.removeObserver(processObserver)
-    }
-
     private fun launchGuarded(block: suspend () -> Unit): Job {
-        return viewModelScope.launch(crashGuard) {
+        return viewModelScope.launch(crashGuard + Dispatchers.IO) {
             try {
                 block()
             } catch (error: CancellationException) {
@@ -272,8 +306,22 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
         return getApplication<Application>().getString(R.string.picture_menu_failed)
     }
 
+    private fun pictureFailedText(): String {
+        return getApplication<Application>().getString(R.string.picture_failed)
+    }
+
     private companion object {
         const val TAG = "TvRemote"
         const val IME_ACK_MS = 800L
+
+        fun defaultPictureSliders(): List<PictureSliderPref> {
+            return PictureSlider.items.map { item ->
+                PictureSliderPref(
+                    item = item,
+                    shown = PictureSlider.shownByDefault(item),
+                    value = 50,
+                )
+            }
+        }
     }
 }

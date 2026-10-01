@@ -26,6 +26,10 @@ internal enum class TvKey(val code: RemoteKeyCode) {
     MUTE(RemoteKeyCode.KEYCODE_VOLUME_MUTE),
     POWER(RemoteKeyCode.KEYCODE_POWER),
     PLAY_PAUSE(RemoteKeyCode.KEYCODE_MEDIA_PLAY_PAUSE),
+    NEXT(RemoteKeyCode.KEYCODE_MEDIA_NEXT),
+    PREVIOUS(RemoteKeyCode.KEYCODE_MEDIA_PREVIOUS),
+    FAST_FORWARD(RemoteKeyCode.KEYCODE_MEDIA_FAST_FORWARD),
+    REWIND(RemoteKeyCode.KEYCODE_MEDIA_REWIND),
     ENTER(RemoteKeyCode.KEYCODE_ENTER),
     DEL(RemoteKeyCode.KEYCODE_DEL),
 }

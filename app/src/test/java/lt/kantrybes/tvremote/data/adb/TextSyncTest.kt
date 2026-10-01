@@ -13,9 +13,9 @@ class TextSyncTest {
     }
 
     @Test
-    fun lithuanianIsNotAnAdbCommand() {
-        assertFalse(TextSync.isAscii("ą"))
-        assertNull(TextSync.inputCommand("ąžuolas"))
+    fun nonAsciiIsNotAnAdbCommand() {
+        assertFalse(TextSync.isAscii("é"))
+        assertNull(TextSync.inputCommand("café"))
     }
 
     @Test
@@ -36,7 +36,7 @@ class TextSyncTest {
     }
 
     @Test
-    fun lithuanianTailAsksForIme() {
-        assertTrue(TextSync.plan("labas", "labasą").needsIme)
+    fun nonAsciiTailAsksForIme() {
+        assertTrue(TextSync.plan("cafe", "café").needsIme)
     }
 }

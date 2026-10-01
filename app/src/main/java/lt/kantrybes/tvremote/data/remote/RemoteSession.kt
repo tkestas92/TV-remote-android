@@ -17,10 +17,11 @@ import kotlinx.coroutines.withContext
 import remote.Remotemessage.RemoteMessage
 import java.io.IOException
 import java.io.OutputStream
+import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import javax.net.ssl.SSLSocket
 
 internal sealed interface RemoteConnectionState {
     data object Disconnected : RemoteConnectionState
@@ -32,20 +33,26 @@ internal sealed interface RemoteConnectionState {
 
 /**
  * Long-lived TLS session to the TV command port. Pings are answered on the reader
- * thread. Dropped connections reconnect with exponential backoff.
+ * thread. While the app is in the foreground a dropped connection retries every
+ * 2 seconds, after a wake-on-LAN packet, until the process is stopped.
  */
 internal class RemoteSession(
     private val host: String,
     private val identity: ClientIdentity,
     private val scope: CoroutineScope,
+    private val wifi: WifiNetworks,
+    private val macAddress: suspend () -> String,
+    private val consumePendingPower: () -> Boolean,
+    private val onReady: () -> Unit,
 ) {
     private val _state = MutableStateFlow<RemoteConnectionState>(RemoteConnectionState.Connecting)
     val state: StateFlow<RemoteConnectionState> = _state.asStateFlow()
 
     private val writeLock = Any()
-    private var socket: SSLSocket? = null
+    private var socket: Socket? = null
     private var output: OutputStream? = null
-    @Volatile private var ready = false
+    @Volatile var isReady: Boolean = false
+        private set
     @Volatile private var features = RemoteProtocol.DEFAULT_FEATURES
     @Volatile private var imeCounter = 0
     @Volatile private var imeFieldCounter = 0
@@ -54,6 +61,7 @@ internal class RemoteSession(
     private val closedForLiveness = AtomicBoolean(false)
     private var job: Job? = null
     private var closeJob: Job? = null
+    private var wakeJob: Job? = null
 
     val isRunning: Boolean
         get() = job?.isActive == true
@@ -93,7 +101,7 @@ internal class RemoteSession(
 
     /** @return true when the app-link message was written on an active session that negotiated app links. */
     fun sendAppLink(packageName: String): Boolean {
-        if (!ready || features and RemoteProtocol.APP_LINK == 0) return false
+        if (!isReady || features and RemoteProtocol.APP_LINK == 0) return false
         return try {
             write(RemoteProtocol.appLink(packageName))
             true
@@ -105,7 +113,7 @@ internal class RemoteSession(
 
     fun imeEpoch(): Int = imeEpoch.get()
 
-    fun hasIme(): Boolean = ready && features and RemoteProtocol.IME != 0
+    fun hasIme(): Boolean = isReady && features and RemoteProtocol.IME != 0
 
     /** @return false when the session is down, IME was not negotiated, or the write failed. */
     suspend fun sendImeText(text: String): Boolean = withContext(Dispatchers.IO) {
@@ -130,7 +138,7 @@ internal class RemoteSession(
 
     suspend fun sendKeyNow(key: TvKey, press: KeyPress) {
         withContext(Dispatchers.IO) {
-            if (!ready) return@withContext
+            if (!isReady) return@withContext
             try {
                 write(RemoteProtocol.keyInject(key, press))
             } catch (error: IOException) {
@@ -140,7 +148,7 @@ internal class RemoteSession(
     }
 
     fun sendKey(key: TvKey, press: KeyPress) {
-        if (!ready) return
+        if (!isReady) return
         val message = RemoteProtocol.keyInject(key, press)
         scope.launch(Dispatchers.IO) {
             try {
@@ -152,51 +160,57 @@ internal class RemoteSession(
     }
 
     private suspend fun maintain() {
-        var backoffMs = 0L
+        var attempt = 0
         var connectedOnce = false
+        var retryImmediately = false
         try {
             while (currentCoroutineContext().isActive) {
-                if (backoffMs == 0L) {
-                    Log.d(TAG, "Connecting immediately")
-                } else {
-                    delay(backoffMs)
-                }
-                if (!currentCoroutineContext().isActive) return
+                attempt++
                 _state.value = if (connectedOnce) {
                     RemoteConnectionState.Reconnecting
                 } else {
                     RemoteConnectionState.Connecting
                 }
-                ready = false
+                isReady = false
                 features = RemoteProtocol.DEFAULT_FEATURES
                 imeCounter = 0
                 imeFieldCounter = 0
+                startWaking()
+                val wol = sendWakeOnLan()
+                val startedAt = System.nanoTime()
+                val established = AtomicBoolean(false)
                 try {
-                    if (connectAndServe()) {
-                        connectedOnce = true
-                        backoffMs = 0L
-                        continue
-                    }
+                    connectAndServe(attempt, startedAt, wol, established)
+                    connectedOnce = true
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
                     if (!currentCoroutineContext().isActive) {
                         // Stopped.
+                    } else if (!established.get()) {
+                        val ms = elapsedMs(startedAt)
+                        Log.i(TAG, "attempt $attempt, $wol, connect ${connectResult(error)}/${ms}ms")
                     } else if (closedForLiveness.getAndSet(false)) {
-                        Log.i(TAG, "Reconnecting after 60s with no message")
+                        Log.i(TAG, "No remote message for ${LIVENESS_MS}ms, reconnecting")
+                        retryImmediately = true
+                    } else if (error is SocketTimeoutException) {
+                        Log.i(TAG, "No remote message for ${LIVENESS_MS}ms, reconnecting")
+                        retryImmediately = true
                     } else {
-                        Log.w(TAG, "Remote connection lost", error)
+                        Log.w(TAG, "Remote connection lost: ${error.message}")
+                        retryImmediately = true
                     }
                 }
                 closeSocket()
                 if (!currentCoroutineContext().isActive) return
-                backoffMs = if (backoffMs == 0L) {
-                    INITIAL_BACKOFF_MS
+                if (retryImmediately) {
+                    retryImmediately = false
                 } else {
-                    (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+                    delay(RETRY_INTERVAL_MS)
                 }
             }
         } finally {
+            stopWaking()
             withContext(NonCancellable) {
                 closeSocket()
             }
@@ -206,40 +220,47 @@ internal class RemoteSession(
         }
     }
 
-    private fun connectAndServe(): Boolean {
+    private fun connectAndServe(
+        attempt: Int,
+        startedAtNs: Long,
+        wol: String,
+        established: AtomicBoolean,
+    ) {
         val connection = try {
             connectTls(
                 host = host,
                 port = COMMAND_PORT,
                 identity = identity,
                 connectTimeoutMs = CONNECT_TIMEOUT_MS,
+                handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS,
                 readTimeoutMs = READ_TIMEOUT_MS,
+                socketFactory = wifi.socketFactory(),
+                onSocket = ::trackSocket,
             )
         } catch (error: CannotConnectException) {
             if (error.kind == CannotConnectException.Kind.TLS) {
-                Log.w(TAG, "Command TLS failed; keeping the stored certificate and reconnecting", error)
+                Log.w(TAG, "Command TLS failed; keeping the stored certificate and reconnecting")
             }
             throw error
         }
-        socket = connection.socket
+        trackSocket(connection.socket)
         synchronized(writeLock) {
             output = connection.socket.outputStream
         }
-        Log.d(TAG, "TLS connected for commands")
+        established.set(true)
+        Log.i(TAG, "attempt $attempt, $wol, connect ok/${elapsedMs(startedAtNs)}ms")
         lastMessageAt.set(System.currentTimeMillis())
-        val watch = scope.launch {
+        val watch = scope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(LIVENESS_POLL_MS)
                 val idle = System.currentTimeMillis() - lastMessageAt.get()
                 if (idle >= LIVENESS_MS) {
-                    Log.i(TAG, "No remote message for ${idle}ms, reconnecting")
                     closedForLiveness.set(true)
-                    closeSocket()
+                    withContext(NonCancellable) { closeSocket() }
                     return@launch
                 }
             }
         }
-        var becameReady = false
         try {
             val input = connection.socket.inputStream
             while (true) {
@@ -261,17 +282,65 @@ internal class RemoteSession(
                 }
                 if (outcome.imeActivity) imeEpoch.incrementAndGet()
                 if (outcome.sessionReady) {
-                    becameReady = true
-                    ready = true
+                    isReady = true
+                    stopWaking()
                     _state.value = RemoteConnectionState.Connected
-                    Log.d(TAG, "Remote session ready")
+                    Log.i(TAG, "Remote session ready")
+                    onReady()
+                    if (consumePendingPower()) {
+                        write(RemoteProtocol.keyInject(TvKey.POWER, KeyPress.SHORT))
+                        Log.i(TAG, "Sent queued power key")
+                    }
                 }
                 outcome.reply?.let { write(it) }
             }
         } finally {
             watch.cancel()
         }
-        return becameReady
+    }
+
+    private fun startWaking() {
+        if (wakeJob?.isActive == true) return
+        wakeJob = scope.launch(Dispatchers.IO) {
+            delay(RETRY_INTERVAL_MS)
+            while (isActive) {
+                sendWakeOnLan()
+                delay(RETRY_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopWaking() {
+        wakeJob?.cancel()
+        wakeJob = null
+    }
+
+    private suspend fun sendWakeOnLan(): String {
+        val sent = withContext(Dispatchers.IO) {
+            WakeOnLan.send(macAddress()) { socket -> wifi.bind(socket) }
+        }
+        return if (sent) "WoL sent" else "WoL failed"
+    }
+
+    private fun trackSocket(next: Socket) {
+        synchronized(writeLock) {
+            socket = next
+        }
+    }
+
+    private fun connectResult(error: Exception): String {
+        val kind = (error as? CannotConnectException)?.kind
+        return when (kind) {
+            CannotConnectException.Kind.TIMEOUT -> "timeout"
+            CannotConnectException.Kind.REFUSED -> "refused"
+            CannotConnectException.Kind.TLS -> "tls"
+            CannotConnectException.Kind.OTHER -> "error"
+            null -> if (error is SocketTimeoutException) "timeout" else "error"
+        }
+    }
+
+    private fun elapsedMs(startedAtNs: Long): Long {
+        return (System.nanoTime() - startedAtNs) / 1_000_000
     }
 
     private fun write(message: RemoteMessage) {
@@ -283,7 +352,7 @@ internal class RemoteSession(
     }
 
     private fun closeSocket() {
-        ready = false
+        isReady = false
         val current = synchronized(writeLock) {
             output = null
             val open = socket
@@ -298,11 +367,11 @@ internal class RemoteSession(
 
     private companion object {
         const val TAG = "TvRemoteSession"
-        const val CONNECT_TIMEOUT_MS = 5_000
-        const val READ_TIMEOUT_MS = 0
-        const val LIVENESS_MS = 60_000L
-        const val LIVENESS_POLL_MS = 5_000L
-        const val INITIAL_BACKOFF_MS = 100L
-        const val MAX_BACKOFF_MS = 30_000L
+        const val CONNECT_TIMEOUT_MS = 3_000
+        const val HANDSHAKE_TIMEOUT_MS = 5_000
+        const val READ_TIMEOUT_MS = 12_000
+        const val LIVENESS_MS = 12_000L
+        const val LIVENESS_POLL_MS = 1_000L
+        const val RETRY_INTERVAL_MS = 2_000L
     }
 }

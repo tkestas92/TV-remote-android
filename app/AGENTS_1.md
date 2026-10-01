@@ -65,8 +65,8 @@ Rules:
 
 ## Status (2026-09-24)
 
-- **Phase 1: DONE.** Pairing, remote session (D-pad + Swipe modes), power incl. wake from standby, app shortcuts via ADB.
-- **Extra: DONE.** Separate "Nustatymai" screen (choose/reorder shortcuts, D-pad/Swipe, picture-menu button toggle) that never re-pairs; "TV ryšys" screen is the only place pairing can start.
+- **Phase 1: DONE.** Pairing, remote session (Buttons and D-pad modes), power incl. wake from standby, app shortcuts via ADB.
+- **Extra: DONE.** Separate "Settings" screen (choose/reorder shortcuts, D-pad/Swipe, picture-menu button toggle) that never re-pairs; "TV connection" screen is the only place pairing can start.
 - **Next:** Phase 2 — keyboard (IME) and Share → TV.
 
 ## Phase 1 — MVP remote

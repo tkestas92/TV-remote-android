@@ -75,6 +75,7 @@ dependencies {
     implementation(libs.protobuf.kotlin.lite)
     implementation(libs.bouncycastle.bcpkix)
     implementation(libs.dadb)
+    implementation(libs.androidx.media)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

@@ -1,6 +1,10 @@
 package lt.kantrybes.tvremote.data.remote
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
@@ -15,21 +19,28 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import lt.kantrybes.tvremote.data.settings.SettingsRepository
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * One TLS session to port 6466 for the whole process. The process lifecycle
- * stops it when the app is backgrounded and opens a fresh one, with no backoff,
- * when the app returns.
+ * stops it when the app is backgrounded, unless the media card is keeping the
+ * session and ADB connection alive. Foreground and Wi-Fi availability cancel
+ * any in-flight connect and start a fresh one immediately.
  */
 internal class RemoteSessionController(
     application: Application,
     private val scope: CoroutineScope,
+    private val onSessionReady: (String) -> Unit = {},
+    private val onForegroundStop: () -> Unit = {},
 ) : DefaultLifecycleObserver {
     private val settings = SettingsRepository(application)
     private val certificates = ClientCertificateStore(File(application.filesDir, "remote-identity"))
+    private val wifi = WifiNetworks()
+    private val connectivity = application.getSystemService(ConnectivityManager::class.java)
     private val gate = Mutex()
     private val generation = AtomicInteger(0)
+    private val pendingPower = AtomicBoolean(false)
 
     private val _state = MutableStateFlow<RemoteConnectionState>(RemoteConnectionState.Disconnected)
     val state: StateFlow<RemoteConnectionState> = _state.asStateFlow()
@@ -37,15 +48,38 @@ internal class RemoteSessionController(
     @Volatile private var session: RemoteSession? = null
     private var sessionHost: String? = null
     private var sessionEpoch = -1
+    private val epoch = AtomicInteger(0)
     private var collectJob: kotlinx.coroutines.Job? = null
     @Volatile private var wanted = false
     @Volatile private var processStarted = false
-    private var epoch = 0
+    @Volatile private var keepAlive = false
+
+    internal val processInForeground: Boolean
+        get() = processStarted
+
+    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val changed = wifi.network != network
+            wifi.network = network
+            restartNow(force = changed)
+        }
+
+        override fun onLost(network: Network) {
+            if (wifi.network == network) wifi.network = null
+        }
+    }
 
     init {
         val lifecycle = ProcessLifecycleOwner.get().lifecycle
         lifecycle.addObserver(this)
         processStarted = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        scope.launch {
+            rememberCurrentWifi()
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            connectivity.registerNetworkCallback(request, wifiCallback)
+        }
     }
 
     fun ensureRunning() {
@@ -58,6 +92,7 @@ internal class RemoteSessionController(
 
     fun stop() {
         wanted = false
+        if (keepAlive) return
         generation.incrementAndGet()
         if (_state.value !is RemoteConnectionState.NeedsPairing) {
             _state.value = RemoteConnectionState.Disconnected
@@ -65,9 +100,22 @@ internal class RemoteSessionController(
         scheduleApply()
     }
 
+    fun setMediaKeepAlive(keep: Boolean) {
+        val was = keepAlive
+        keepAlive = keep
+        if (was && !keep) {
+            if (!processStarted) onForegroundStop()
+            scheduleApply()
+        }
+    }
+
     override fun onStart(owner: LifecycleOwner) {
         processStarted = true
-        epoch++
+        if (keepAlive && session?.isRunning == true) {
+            Log.i(TAG, "App foregrounded, media session already up")
+            return
+        }
+        epoch.incrementAndGet()
         if (!wanted) return
         if (_state.value is RemoteConnectionState.Disconnected) {
             _state.value = RemoteConnectionState.Connecting
@@ -78,6 +126,11 @@ internal class RemoteSessionController(
 
     override fun onStop(owner: LifecycleOwner) {
         processStarted = false
+        if (keepAlive) {
+            Log.i(TAG, "App backgrounded, media card keeps the session")
+            return
+        }
+        onForegroundStop()
         generation.incrementAndGet()
         if (_state.value !is RemoteConnectionState.NeedsPairing) {
             _state.value = RemoteConnectionState.Disconnected
@@ -87,11 +140,19 @@ internal class RemoteSessionController(
     }
 
     fun sendKey(key: TvKey, press: KeyPress) {
+        if (queuePower(key, press)) return
         session?.sendKey(key, press)
     }
 
     suspend fun sendKeyNow(key: TvKey, press: KeyPress) {
+        if (queuePower(key, press)) return
         session?.sendKeyNow(key, press)
+    }
+
+    private fun queuePower(key: TvKey, press: KeyPress): Boolean {
+        if (key != TvKey.POWER || session?.isReady == true) return false
+        if (press == KeyPress.SHORT || press == KeyPress.START_LONG) pendingPower.set(true)
+        return true
     }
 
     fun imeEpoch(): Int = session?.imeEpoch() ?: 0
@@ -123,6 +184,7 @@ internal class RemoteSessionController(
     }
 
     private suspend fun applyLocked() {
+        if ((!wanted || !processStarted) && keepAlive && session?.isRunning == true) return
         if (!wanted || !processStarted) {
             shutdownLocked()
             if (_state.value !is RemoteConnectionState.NeedsPairing) {
@@ -141,13 +203,21 @@ internal class RemoteSessionController(
             _state.value = RemoteConnectionState.NeedsPairing
             return
         }
-        if (session?.isRunning == true && sessionEpoch == epoch && sessionHost == host) return
+        if (session?.isRunning == true && sessionEpoch == epoch.get() && sessionHost == host) return
         shutdownLocked()
         if (!wanted || !processStarted) return
-        val created = RemoteSession(host, identity, scope)
+        val created = RemoteSession(
+            host = host,
+            identity = identity,
+            scope = scope,
+            wifi = wifi,
+            macAddress = { WakeOnLan.resolveMac(settings.read().tvMac) },
+            consumePendingPower = { pendingPower.compareAndSet(true, false) },
+            onReady = { onSessionReady(host) },
+        )
         session = created
         sessionHost = host
-        sessionEpoch = epoch
+        sessionEpoch = epoch.get()
         val token = generation.get()
         collectJob = scope.launch {
             created.state.collect { next ->
@@ -165,6 +235,22 @@ internal class RemoteSessionController(
         session = null
         sessionHost = null
         current?.awaitStopped()
+    }
+
+    private fun restartNow(force: Boolean = false) {
+        if (!wanted || !processStarted) return
+        if (!force && session?.isReady == true) return
+        Log.i(TAG, "Wi-Fi available, reconnecting immediately")
+        epoch.incrementAndGet()
+        scheduleApply()
+    }
+
+    private fun rememberCurrentWifi() {
+        val active = connectivity.activeNetwork ?: return
+        val capabilities = connectivity.getNetworkCapabilities(active) ?: return
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            wifi.network = active
+        }
     }
 
     private companion object {

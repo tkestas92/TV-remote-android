@@ -107,15 +107,15 @@ class RemoteProtocolTest {
 
     @Test
     fun imeTextMatchesAndroidTvRemote2BatchEdit() {
-        val message = RemoteProtocol.imeText("ąžuolas", imeCounter = 3, fieldCounter = 4)
+        val message = RemoteProtocol.imeText("café", imeCounter = 3, fieldCounter = 4)
         val edit = message.remoteImeBatchEdit.getEditInfo(0)
 
         assertEquals(3, message.remoteImeBatchEdit.imeCounter)
         assertEquals(4, message.remoteImeBatchEdit.fieldCounter)
         assertEquals(1, edit.insert)
-        assertEquals(6, edit.textFieldStatus.start)
-        assertEquals(6, edit.textFieldStatus.end)
-        assertEquals("ąžuolas", edit.textFieldStatus.value)
+        assertEquals(3, edit.textFieldStatus.start)
+        assertEquals(3, edit.textFieldStatus.end)
+        assertEquals("café", edit.textFieldStatus.value)
     }
 
     @Test

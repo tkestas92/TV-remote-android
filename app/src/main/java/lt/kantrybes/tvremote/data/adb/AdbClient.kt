@@ -4,14 +4,21 @@ import android.util.Log
 import dadb.AdbKeyPair
 import dadb.AdbStream
 import dadb.Dadb
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
 import java.io.File
 import java.net.SocketTimeoutException
+import java.util.concurrent.Executors
 
 /**
  * One ADB connection to the TV. The RSA key lives in app-private storage,
  * never in the shared ~/.android directory.
  */
 internal class AdbClient(private val keyDirectory: File) {
+    val dispatcher: CoroutineDispatcher = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "TvRemoteAdb").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
+
     private val lock = Any()
     private var dadb: Dadb? = null
     private var host: String? = null
@@ -19,6 +26,15 @@ internal class AdbClient(private val keyDirectory: File) {
 
     fun isReady(host: String): Boolean = synchronized(lock) {
         dadb != null && this.host == host
+    }
+
+    /**
+     * A second ADB connection for a long-lived stream. The shared connection's
+     * read timeout would drop a mirror that sits on a still screen.
+     */
+    fun openDedicated(host: String, socketTimeoutMs: Int): Dadb {
+        val keys = synchronized(lock) { loadKeyPair() }
+        return Dadb.create(host, PORT, keys, CONNECT_TIMEOUT_MS, socketTimeoutMs, true)
     }
 
     fun connection(host: String, socketTimeoutMs: Int = HANDSHAKE_READ_TIMEOUT_MS): Dadb = synchronized(lock) {
@@ -74,8 +90,8 @@ internal class AdbClient(private val keyDirectory: File) {
     private companion object {
         const val TAG = "TvRemoteAdb"
         const val PORT = 5555
-        const val CONNECT_TIMEOUT_MS = 5_000
-        const val HANDSHAKE_READ_TIMEOUT_MS = 30_000
+        const val CONNECT_TIMEOUT_MS = 3_000
+        const val HANDSHAKE_READ_TIMEOUT_MS = 5_000
     }
 }
 

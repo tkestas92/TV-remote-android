@@ -9,13 +9,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import lt.kantrybes.tvremote.data.settings.AppShortcut
+import lt.kantrybes.tvremote.data.settings.SettingsRepository
 import lt.kantrybes.tvremote.data.settings.Shortcuts
 
 /**
  * Launches a TV app. App links stay implemented but are used only when
- * [supportsAppLinks] is true for this TV. Otherwise monkey runs on the warm ADB connection.
+ * [supportsAppLinks] is true for this TV. Otherwise the cached launcher
+ * activity is started with `am start`, and monkey is only the fallback.
  */
-internal class AppLauncher(private val adb: AdbClient) {
+internal class AppLauncher(
+    private val adb: AdbClient,
+    private val settings: SettingsRepository? = null,
+) {
     suspend fun openPictureMenu(
         host: String,
         onWaiting: () -> Unit,
@@ -106,16 +111,28 @@ internal class AppLauncher(private val adb: AdbClient) {
         }
     }
 
-    suspend fun ensureConnected(
-        host: String,
-        onWaiting: () -> Unit,
-        onClear: () -> Unit,
-        onError: () -> Unit,
-    ) {
-        if (host.isBlank() || adb.isReady(host)) return
-        connect(host, onWaiting, onClear, onError)
+    /** Resolves any shortcut that is not already cached. Safe to run after ADB is warm. */
+    suspend fun prefetch(host: String, packages: List<String>) {
+        val store = settings ?: return
+        if (host.isBlank() || packages.isEmpty()) return
+        if (connect(host, onWaiting = {}, onClear = {}, onError = {}) == null) return
+        for (packageName in packages) {
+            if (!Shortcuts.isPackageName(packageName)) continue
+            if (store.launcherComponent(packageName) != null) continue
+            val component = try {
+                resolve(host, packageName)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.w(TAG, "Resolve failed for $packageName: ${error.message}")
+                continue
+            } ?: continue
+            store.setLauncherComponent(packageName, component)
+            Log.i(TAG, "Resolved $packageName to $component")
+        }
     }
 
+    /** @return true when the TV app was started. */
     suspend fun launch(
         shortcut: AppShortcut,
         host: String,
@@ -124,14 +141,17 @@ internal class AppLauncher(private val adb: AdbClient) {
         onWaiting: () -> Unit,
         onClear: () -> Unit,
         onError: () -> Unit,
-    ) {
+    ): Boolean {
         try {
-            launchOnce(shortcut, host, supportsAppLinks, sendAppLink, onWaiting, onClear, onError)
+            return launchOnce(shortcut, host, supportsAppLinks, sendAppLink, onWaiting, onClear, onError)
         } catch (error: CancellationException) {
             throw error
+        } catch (_: AdbNeedsAuth) {
+            return false
         } catch (error: Exception) {
             Log.e(TAG, "Launch failed for ${shortcut.packageName}", error)
             onError()
+            return false
         }
     }
 
@@ -143,16 +163,15 @@ internal class AppLauncher(private val adb: AdbClient) {
         onWaiting: () -> Unit,
         onClear: () -> Unit,
         onError: () -> Unit,
-    ) {
+    ): Boolean {
         if (!Shortcuts.isPackageName(shortcut.packageName)) {
             Log.w(TAG, "Refusing launch of invalid package ${shortcut.packageName}")
-            return
+            return false
         }
         if (host.isBlank()) {
             Log.w(TAG, "No TV address for ${shortcut.packageName}")
-            return
+            return false
         }
-        val startedAt = System.currentTimeMillis()
         if (supportsAppLinks) {
             val wasForeground = if (adb.isReady(host)) {
                 try {
@@ -170,12 +189,71 @@ internal class AppLauncher(private val adb: AdbClient) {
             if (sent && connected && waitUntilResumed(host, shortcut.packageName)) {
                 val method = if (wasForeground) "already in foreground after app link" else "launched via app link"
                 Log.i(TAG, "${shortcut.label} (${shortcut.packageName}) $method")
-                return
+                return true
             }
-            if (!connected) return
+            if (!connected) return false
             Log.i(TAG, "${shortcut.label} (${shortcut.packageName}) app link ignored, trying ADB")
         }
-        if (connect(host, onWaiting, onClear, onError) == null) return
+        if (connect(host, onWaiting, onClear, onError) == null) return false
+        if (startWithActivity(shortcut, host, onWaiting)) return true
+        return startWithMonkey(shortcut, host, onWaiting, onError)
+    }
+
+    private suspend fun startWithActivity(
+        shortcut: AppShortcut,
+        host: String,
+        onWaiting: () -> Unit,
+    ): Boolean {
+        val store = settings ?: return false
+        val cached = store.launcherComponent(shortcut.packageName)
+        val component = cached ?: resolveAndStore(host, shortcut.packageName) ?: return false
+        if (startComponent(host, shortcut, component, onWaiting)) return true
+        store.clearLauncherComponent(shortcut.packageName)
+        val fresh = resolveAndStore(host, shortcut.packageName) ?: return false
+        if (fresh == component) {
+            store.clearLauncherComponent(shortcut.packageName)
+            return false
+        }
+        return startComponent(host, shortcut, fresh, onWaiting).also { started ->
+            if (!started) store.clearLauncherComponent(shortcut.packageName)
+        }
+    }
+
+    private suspend fun startComponent(
+        host: String,
+        shortcut: AppShortcut,
+        component: String,
+        onWaiting: () -> Unit,
+    ): Boolean {
+        val startedAt = System.nanoTime()
+        val output = try {
+            shellRetrying(host, LauncherActivity.startCommand(component))
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: AdbAuthException) {
+            onWaiting()
+            Log.w(TAG, "ADB authorization pending for ${shortcut.packageName}")
+            throw AdbNeedsAuth()
+        } catch (error: Exception) {
+            Log.w(TAG, "am start failed for ${shortcut.packageName}", error)
+            return false
+        }
+        if (LauncherActivity.startFailed(output)) {
+            Log.w(TAG, "am start failed for $component: ${output.trim()}")
+            return false
+        }
+        val elapsed = (System.nanoTime() - startedAt) / 1_000_000
+        Log.i(TAG, "${shortcut.label} launched via am in $elapsed ms")
+        return true
+    }
+
+    private suspend fun startWithMonkey(
+        shortcut: AppShortcut,
+        host: String,
+        onWaiting: () -> Unit,
+        onError: () -> Unit,
+    ): Boolean {
+        val startedAt = System.nanoTime()
         val output = try {
             runMonkey(host, shortcut.packageName)
         } catch (error: CancellationException) {
@@ -183,18 +261,48 @@ internal class AppLauncher(private val adb: AdbClient) {
         } catch (_: AdbAuthException) {
             onWaiting()
             Log.w(TAG, "ADB authorization pending for ${shortcut.packageName}")
-            return
+            return false
         } catch (error: Exception) {
             Log.w(TAG, "ADB monkey failed for ${shortcut.packageName}", error)
             onError()
-            return
+            return false
         }
-        val elapsed = System.currentTimeMillis() - startedAt
-        if ("Events injected: 1" in output) {
-            Log.i(TAG, "${shortcut.label} (${shortcut.packageName}) launched via adb in $elapsed ms")
+        val elapsed = (System.nanoTime() - startedAt) / 1_000_000
+        return if ("Events injected: 1" in output) {
+            Log.i(TAG, "${shortcut.label} launched via monkey fallback in $elapsed ms")
+            true
         } else {
             Log.w(TAG, "ADB monkey did not launch ${shortcut.packageName} in $elapsed ms: ${output.trim()}")
             onError()
+            false
+        }
+    }
+
+    private suspend fun resolveAndStore(host: String, packageName: String): String? {
+        val store = settings ?: return null
+        val component = resolve(host, packageName) ?: return null
+        store.setLauncherComponent(packageName, component)
+        return component
+    }
+
+    private suspend fun resolve(host: String, packageName: String): String? {
+        val leanback = shellRetrying(host, LauncherActivity.resolveCommand(packageName, LauncherActivity.LEANBACK))
+        LauncherActivity.componentFromResolve(leanback, packageName)?.let { return it }
+        val launcher = shellRetrying(host, LauncherActivity.resolveCommand(packageName, LauncherActivity.LAUNCHER))
+        return LauncherActivity.componentFromResolve(launcher, packageName)
+    }
+
+    /** Runs one shell command on the warm ADB connection. Null when the TV cannot be reached. */
+    internal suspend fun exec(host: String, command: String): String? {
+        if (host.isBlank()) return null
+        if (connect(host, onWaiting = {}, onClear = {}, onError = {}) == null) return null
+        return try {
+            shellRetrying(host, command)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Log.w(TAG, "ADB command failed", error)
+            null
         }
     }
 
@@ -220,9 +328,10 @@ internal class AppLauncher(private val adb: AdbClient) {
         onClear: () -> Unit,
         onError: () -> Unit,
     ): Dadb? {
-        if (!adb.isReady(host)) onWaiting()
+        val waiting = !adb.isReady(host)
+        if (waiting) onWaiting()
         return try {
-            handshake(host).also { onClear() }
+            handshake(host).also { if (waiting) onClear() }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -248,7 +357,7 @@ internal class AppLauncher(private val adb: AdbClient) {
     }
 
     private suspend fun handshake(host: String): Dadb {
-        return withContext(Dispatchers.IO) { adb.connection(host) }
+        return withContext(adb.dispatcher) { adb.connection(host) }
     }
 
     private suspend fun waitUntilResumed(host: String, packageName: String): Boolean {
@@ -272,16 +381,18 @@ internal class AppLauncher(private val adb: AdbClient) {
 
     private suspend fun shell(host: String, command: String, existing: Dadb? = null): String {
         return try {
-            withContext(Dispatchers.IO) {
+            withContext(adb.dispatcher) {
                 AdbShell.exec(existing ?: adb.connection(host), command)
             }
         } catch (_: AdbConnectionClosedException) {
             adb.drop()
-            withContext(Dispatchers.IO) {
+            withContext(adb.dispatcher) {
                 AdbShell.exec(adb.connection(host), command)
             }
         }
     }
+
+    private class AdbNeedsAuth : Exception()
 
     private companion object {
         const val TAG = "TvRemoteLaunch"

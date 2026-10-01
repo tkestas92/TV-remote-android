@@ -9,6 +9,7 @@ import java.security.Principal
 import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import javax.net.SocketFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLException
@@ -27,6 +28,9 @@ internal fun connectTls(
     identity: ClientIdentity,
     connectTimeoutMs: Int,
     readTimeoutMs: Int,
+    handshakeTimeoutMs: Int = if (readTimeoutMs == 0) DEFAULT_HANDSHAKE_TIMEOUT_MS else readTimeoutMs,
+    socketFactory: SocketFactory = SocketFactory.getDefault(),
+    onSocket: (Socket) -> Unit = {},
 ): TlsConnection {
     val ip = TvAddress.requireIpv4(host)
     val trustManager = CaptureTrustManager()
@@ -36,39 +40,46 @@ internal fun connectTls(
         arrayOf(trustManager),
         SecureRandom(),
     )
-    val sslSocket = sslContext.socketFactory.createSocket() as SSLSocket
+    val plain = socketFactory.createSocket()
+    var open: Socket = plain
+    onSocket(plain)
     try {
+        plain.tcpNoDelay = true
+        plain.soTimeout = handshakeTimeoutMs
+        plain.connect(InetSocketAddress(ip, port), connectTimeoutMs)
+        val sslSocket = sslContext.socketFactory.createSocket(plain, ip, port, true) as SSLSocket
+        open = sslSocket
+        onSocket(sslSocket)
         sslSocket.useClientMode = true
         sslSocket.tcpNoDelay = true
         val protocols = sslSocket.supportedProtocols.filter { it == "TLSv1.2" || it == "TLSv1.3" }
         if (protocols.isNotEmpty()) {
             sslSocket.enabledProtocols = protocols.toTypedArray()
         }
-        sslSocket.connect(InetSocketAddress(ip, port), connectTimeoutMs)
-        // 0 means block until data arrives. Keep a finite timeout only for the handshake,
-        // then drop it so a quiet TV is not treated as a dead socket.
-        sslSocket.soTimeout = if (readTimeoutMs == 0) HANDSHAKE_READ_TIMEOUT_MS else readTimeoutMs
+        sslSocket.soTimeout = handshakeTimeoutMs
         sslSocket.startHandshake()
-        sslSocket.soTimeout = readTimeoutMs
+        val steadyTimeout = if (readTimeoutMs > 0) readTimeoutMs else handshakeTimeoutMs
+        sslSocket.soTimeout = steadyTimeout
+        plain.soTimeout = steadyTimeout
         val serverCertificate = trustManager.serverCertificate
             ?: sslSocket.session.peerCertificates.filterIsInstance<X509Certificate>().firstOrNull()
         return TlsConnection(sslSocket, serverCertificate)
     } catch (error: SocketTimeoutException) {
-        sslSocket.close()
+        open.close()
         throw CannotConnectException(CannotConnectException.Kind.TIMEOUT, error)
     } catch (error: ConnectException) {
-        sslSocket.close()
+        open.close()
         throw CannotConnectException(CannotConnectException.Kind.REFUSED, error)
     } catch (error: SSLException) {
-        sslSocket.close()
+        open.close()
         throw CannotConnectException(CannotConnectException.Kind.TLS, error)
     } catch (error: IOException) {
-        sslSocket.close()
+        open.close()
         throw CannotConnectException(CannotConnectException.Kind.OTHER, error)
     }
 }
 
-private const val HANDSHAKE_READ_TIMEOUT_MS = 120_000
+private const val DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000
 
 private class FixedClientKeyManager(
     private val privateKey: PrivateKey,

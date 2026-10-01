@@ -18,6 +18,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -55,7 +56,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import lt.kantrybes.tvremote.R
+import lt.kantrybes.tvremote.data.settings.ControlMode
+import lt.kantrybes.tvremote.data.settings.PictureSlider
 import lt.kantrybes.tvremote.data.remote.KeyPress
 import lt.kantrybes.tvremote.data.remote.RemoteConnectionState
 import lt.kantrybes.tvremote.data.remote.TvKey
@@ -69,11 +73,14 @@ import lt.kantrybes.tvremote.ui.shortcuts.ShortcutGrid
 internal fun RemoteScreen(
     network: LocalNetworkAccess,
     onOpenSettings: () -> Unit,
+    onOpenScreen: () -> Unit,
     viewModel: RemoteViewModel = viewModel(),
 ) {
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val shortcuts by viewModel.shortcuts.collectAsStateWithLifecycle()
     val showPictureMenu by viewModel.showPictureMenu.collectAsStateWithLifecycle()
+    val controlMode by viewModel.controlMode.collectAsStateWithLifecycle()
+    val pictureSliders by viewModel.pictureSliders.collectAsStateWithLifecycle()
     val adbMessage by viewModel.adbMessage.collectAsStateWithLifecycle()
     var keyboardOpen by rememberSaveable { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -101,6 +108,8 @@ internal fun RemoteScreen(
         )
     }
     val ready = connection is RemoteConnectionState.Connected
+    val waking = connection is RemoteConnectionState.Connecting ||
+        connection is RemoteConnectionState.Reconnecting
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
@@ -116,6 +125,17 @@ internal fun RemoteScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onOpenScreen()
+                        },
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_screen),
+                            contentDescription = stringResource(R.string.screen),
+                        )
+                    }
                     IconButton(
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -169,6 +189,19 @@ internal fun RemoteScreen(
                 onLaunch = viewModel::launchShortcut,
                 onEdit = { editingShortcut = it },
             )
+            pictureSliders.filter { it.shown }.forEach { slider ->
+                key(slider.item) {
+                    PictureValueSlider(
+                        item = slider.item,
+                        value = slider.value,
+                        enabled = ready,
+                        onRelease = { chosen ->
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.setPictureValue(slider.item, chosen)
+                        },
+                    )
+                }
+            }
             if (network.denied && !network.granted) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     LocalNetworkDeniedMessage(network)
@@ -188,26 +221,12 @@ internal fun RemoteScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
             ) {
-                KeyButton(stringResource(R.string.key_power), TvKey.POWER, ready, viewModel::sendKey)
+                KeyButton(stringResource(R.string.key_power), TvKey.POWER, ready || waking, viewModel::sendKey)
                 KeyButton(stringResource(R.string.key_home), TvKey.HOME, ready, viewModel::sendKey)
             }
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                KeyButton(stringResource(R.string.key_up), TvKey.UP, ready, viewModel::sendKey)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    KeyButton(stringResource(R.string.key_left), TvKey.LEFT, ready, viewModel::sendKey)
-                    KeyButton(
-                        label = stringResource(R.string.key_ok),
-                        key = TvKey.OK,
-                        enabled = ready,
-                        onKey = viewModel::sendKey,
-                        size = 96.dp,
-                    )
-                    KeyButton(stringResource(R.string.key_right), TvKey.RIGHT, ready, viewModel::sendKey)
-                }
-                KeyButton(stringResource(R.string.key_down), TvKey.DOWN, ready, viewModel::sendKey)
+            when (controlMode) {
+                ControlMode.BUTTONS -> ButtonCluster(enabled = ready, onKey = viewModel::sendKey)
+                ControlMode.DPAD -> DirectionPad(enabled = ready, onKey = viewModel::sendKey)
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -248,7 +267,32 @@ internal fun RemoteScreen(
 }
 
 @Composable
-private fun KeyButton(
+private fun ButtonCluster(
+    enabled: Boolean,
+    onKey: (TvKey, KeyPress) -> Unit,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        KeyButton(stringResource(R.string.key_up), TvKey.UP, enabled, onKey)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            KeyButton(stringResource(R.string.key_left), TvKey.LEFT, enabled, onKey)
+            KeyButton(
+                label = stringResource(R.string.key_ok),
+                key = TvKey.OK,
+                enabled = enabled,
+                onKey = onKey,
+                size = 96.dp,
+            )
+            KeyButton(stringResource(R.string.key_right), TvKey.RIGHT, enabled, onKey)
+        }
+        KeyButton(stringResource(R.string.key_down), TvKey.DOWN, enabled, onKey)
+    }
+}
+
+@Composable
+internal fun KeyButton(
     label: String,
     key: TvKey,
     enabled: Boolean,
@@ -268,7 +312,8 @@ private fun KeyButton(
                 role = Role.Button
                 contentDescription = label
             }
-            .pointerInput(key, longPressMs) {
+            .pointerInput(key, enabled, longPressMs) {
+                if (!enabled) return@pointerInput
                 detectTapGestures(
                     onPress = {
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -300,11 +345,52 @@ private fun KeyButton(
 }
 
 @Composable
+private fun PictureValueSlider(
+    item: String,
+    value: Int,
+    enabled: Boolean,
+    onRelease: (Int) -> Unit,
+) {
+    var drag by remember(item) { mutableStateOf<Float?>(null) }
+    val shown = drag ?: value.toFloat()
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = stringResource(
+                R.string.picture_slider_value,
+                stringResource(pictureSliderLabel(item)),
+                shown.roundToInt(),
+            ),
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Slider(
+            value = shown,
+            onValueChange = { drag = it },
+            onValueChangeFinished = {
+                val chosen = (drag ?: value.toFloat()).roundToInt()
+                drag = null
+                onRelease(chosen)
+            },
+            valueRange = 0f..100f,
+            enabled = enabled,
+        )
+    }
+}
+
+private fun pictureSliderLabel(item: String): Int {
+    return when (item) {
+        PictureSlider.BRIGHTNESS -> R.string.brightness
+        PictureSlider.COLOR_SATURATION -> R.string.color_saturation
+        PictureSlider.SHARPNESS -> R.string.sharpness
+        else -> R.string.contrast
+    }
+}
+
+@Composable
 private fun connectionLabel(state: RemoteConnectionState): String {
     return when (state) {
         RemoteConnectionState.Connected -> stringResource(R.string.connection_connected)
-        RemoteConnectionState.Connecting -> stringResource(R.string.connection_connecting)
-        RemoteConnectionState.Reconnecting -> stringResource(R.string.connection_reconnecting)
+        RemoteConnectionState.Connecting,
+        RemoteConnectionState.Reconnecting -> stringResource(R.string.connection_waking)
         RemoteConnectionState.Disconnected -> stringResource(R.string.connection_disconnected)
         RemoteConnectionState.NeedsPairing -> stringResource(R.string.connection_needs_pairing)
     }

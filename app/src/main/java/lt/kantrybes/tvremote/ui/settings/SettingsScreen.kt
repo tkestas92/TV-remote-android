@@ -18,6 +18,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import lt.kantrybes.tvremote.R
+import lt.kantrybes.tvremote.data.settings.ControlMode
+import lt.kantrybes.tvremote.data.settings.PictureSlider
 import lt.kantrybes.tvremote.ui.LocalNetworkAccess
 import lt.kantrybes.tvremote.ui.LocalNetworkDeniedMessage
 
@@ -58,6 +63,7 @@ internal fun SettingsScreen(
         state = state,
         network = network,
         onTvIpChange = viewModel::onTvIpChange,
+        onTvMacChange = viewModel::onTvMacChange,
         onTestConnection = { network.request(viewModel::testConnection) },
         onStartPairing = { network.request(viewModel::startPairing) },
         onCodeChange = viewModel::onCodeChange,
@@ -65,6 +71,9 @@ internal fun SettingsScreen(
         onCancelPairing = viewModel::cancelPairing,
         onOpenRemote = onOpenRemote,
         onShowPictureMenuChange = viewModel::setShowPictureMenuButton,
+        onShowMediaControlsChange = viewModel::setShowMediaControls,
+        onControlModeChange = viewModel::setControlMode,
+        onPictureSliderShown = viewModel::setPictureSliderShown,
     )
 }
 
@@ -74,6 +83,7 @@ internal fun SettingsContent(
     state: SettingsUiState,
     network: LocalNetworkAccess,
     onTvIpChange: (String) -> Unit,
+    onTvMacChange: (String) -> Unit,
     onTestConnection: () -> Unit,
     onStartPairing: () -> Unit,
     onCodeChange: (String) -> Unit,
@@ -81,6 +91,9 @@ internal fun SettingsContent(
     onCancelPairing: () -> Unit,
     onOpenRemote: () -> Unit,
     onShowPictureMenuChange: (Boolean) -> Unit,
+    onShowMediaControlsChange: (Boolean) -> Unit,
+    onControlModeChange: (ControlMode) -> Unit,
+    onPictureSliderShown: (String, Boolean) -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
     val busy = state.testState is TestState.Running || state.pairingInProgress
@@ -115,6 +128,20 @@ internal fun SettingsContent(
                 enabled = !state.pairingInProgress,
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Decimal,
+                    imeAction = ImeAction.Done,
+                ),
+            )
+            OutlinedTextField(
+                value = state.tvMac,
+                onValueChange = onTvMacChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text(stringResource(R.string.tv_mac_label)) },
+                supportingText = { Text(stringResource(R.string.tv_mac_supporting)) },
+                singleLine = true,
+                enabled = !state.pairingInProgress,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Characters,
+                    keyboardType = KeyboardType.Ascii,
                     imeAction = ImeAction.Done,
                 ),
             )
@@ -166,6 +193,26 @@ internal fun SettingsContent(
                     Text(stringResource(R.string.open_remote))
                 }
             }
+            Text(
+                text = stringResource(R.string.control_mode),
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                ControlMode.entries.forEachIndexed { index, mode ->
+                    SegmentedButton(
+                        selected = state.controlMode == mode,
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onControlModeChange(mode)
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(index, ControlMode.entries.size),
+                        icon = {},
+                    ) {
+                        Text(stringResource(controlModeLabel(mode)))
+                    }
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -180,6 +227,38 @@ internal fun SettingsContent(
                     checked = state.showPictureMenuButton,
                     onCheckedChange = onShowPictureMenuChange,
                 )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.show_media_controls),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Switch(
+                    checked = state.showMediaControls,
+                    onCheckedChange = onShowMediaControlsChange,
+                )
+            }
+            state.pictureSliders.forEach { slider ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = stringResource(pictureSliderLabel(slider.item)),
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Switch(
+                        checked = slider.shown,
+                        onCheckedChange = { shown -> onPictureSliderShown(slider.item, shown) },
+                    )
+                }
             }
             Text(
                 text = PairingStatus(state),
@@ -271,6 +350,22 @@ private fun PairingCodeDialog(
             }
         },
     )
+}
+
+private fun controlModeLabel(mode: ControlMode): Int {
+    return when (mode) {
+        ControlMode.BUTTONS -> R.string.control_mode_buttons
+        ControlMode.DPAD -> R.string.control_mode_dpad
+    }
+}
+
+private fun pictureSliderLabel(item: String): Int {
+    return when (item) {
+        PictureSlider.BRIGHTNESS -> R.string.brightness
+        PictureSlider.COLOR_SATURATION -> R.string.color_saturation
+        PictureSlider.SHARPNESS -> R.string.sharpness
+        else -> R.string.contrast
+    }
 }
 
 @Composable

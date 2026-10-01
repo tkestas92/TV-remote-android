@@ -22,6 +22,9 @@ import lt.kantrybes.tvremote.data.remote.InvalidTvAddressException
 import lt.kantrybes.tvremote.data.remote.PairingProtocolException
 import lt.kantrybes.tvremote.data.remote.PairingSession
 import lt.kantrybes.tvremote.data.remote.TvAddress
+import lt.kantrybes.tvremote.data.settings.ControlMode
+import lt.kantrybes.tvremote.data.settings.PictureSlider
+import lt.kantrybes.tvremote.data.settings.PictureSliderPref
 import lt.kantrybes.tvremote.data.settings.SettingsRepository
 import java.io.File
 
@@ -33,13 +36,15 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
 
     private var ipEdited = false
+    private var macEdited = false
     private var saveJob: Job? = null
+    private var macSaveJob: Job? = null
     private var operation: Job? = null
     private var pairingGeneration = 0
     private var session: PairingSession? = null
 
     init {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val snapshot = settings.read()
             val hasCertificate = withContext(Dispatchers.IO) { certificates.exists() }
             val pairedHost = if (snapshot.pairedHost.isNotBlank() && !hasCertificate) {
@@ -51,20 +56,49 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
             _state.update { current ->
                 current.copy(
                     tvIp = if (ipEdited) current.tvIp else snapshot.tvIp,
+                    tvMac = if (macEdited) current.tvMac else snapshot.tvMac,
                     pairedHost = pairedHost,
                     prefsLoaded = true,
                 )
             }
         }
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            settings.migrateControlMode()
+            settings.controlMode().collect { mode ->
+                _state.update { it.copy(controlMode = mode) }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
             settings.showPictureMenuButton().collect { show ->
                 _state.update { it.copy(showPictureMenuButton = show) }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            settings.showMediaControls().collect { show ->
+                _state.update { it.copy(showMediaControls = show) }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            settings.pictureSliders().collect { sliders ->
+                _state.update { it.copy(pictureSliders = sliders) }
             }
         }
     }
 
     fun setShowPictureMenuButton(show: Boolean) {
         viewModelScope.launch { settings.setShowPictureMenuButton(show) }
+    }
+
+    fun setShowMediaControls(show: Boolean) {
+        viewModelScope.launch { settings.setShowMediaControls(show) }
+    }
+
+    fun setControlMode(mode: ControlMode) {
+        viewModelScope.launch { settings.setControlMode(mode) }
+    }
+
+    fun setPictureSliderShown(item: String, shown: Boolean) {
+        viewModelScope.launch { settings.setPictureSliderShown(item, shown) }
     }
 
     fun onTvIpChange(value: String) {
@@ -84,6 +118,16 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
         saveJob = viewModelScope.launch {
             delay(SAVE_DEBOUNCE_MS)
             settings.setTvIp(value)
+        }
+    }
+
+    fun onTvMacChange(value: String) {
+        macEdited = true
+        _state.update { it.copy(tvMac = value) }
+        macSaveJob?.cancel()
+        macSaveJob = viewModelScope.launch {
+            delay(SAVE_DEBOUNCE_MS)
+            settings.setTvMac(value)
         }
     }
 
@@ -238,6 +282,7 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
 
 internal data class SettingsUiState(
     val tvIp: String = "",
+    val tvMac: String = "",
     val pairedHost: String = "",
     val prefsLoaded: Boolean = false,
     val testState: TestState = TestState.Idle,
@@ -245,6 +290,11 @@ internal data class SettingsUiState(
     val code: String = "",
     val codeError: String? = null,
     val showPictureMenuButton: Boolean = true,
+    val showMediaControls: Boolean = true,
+    val controlMode: ControlMode = ControlMode.DPAD,
+    val pictureSliders: List<PictureSliderPref> = PictureSlider.items.map { item ->
+        PictureSliderPref(item, PictureSlider.shownByDefault(item), value = 50)
+    },
 ) {
     val isPaired: Boolean
         get() = pairedHost.isNotBlank() && pairedHost == tvIp.trim()
