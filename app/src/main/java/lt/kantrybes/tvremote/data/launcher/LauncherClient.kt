@@ -39,7 +39,10 @@ internal data class LauncherSnapshot(
     val wallpaper: String,
 )
 
-internal class LauncherCallException(val kind: Kind) : Exception() {
+internal class LauncherCallException(
+    val kind: Kind,
+    val retryAfterSeconds: Int = 0,
+) : Exception() {
     enum class Kind {
         UNREACHABLE,
         NOT_HOME,
@@ -47,6 +50,8 @@ internal class LauncherCallException(val kind: Kind) : Exception() {
         UNAUTHORIZED,
         BAD_WALLPAPER,
         FAILED,
+        LOCKED,
+        PAIRING_CLOSED,
     }
 }
 
@@ -203,6 +208,7 @@ internal class LauncherClient {
     ): T {
         if (BuildConfig.IS_DEMO) throw LauncherCallException(LauncherCallException.Kind.UNREACHABLE)
         val ip = try {
+            // Private LAN only: 10/8, 172.16/12, 192.168/16, 169.254/16.
             TvAddress.requireIpv4(host)
         } catch (error: InvalidTvAddressException) {
             throw LauncherCallException(LauncherCallException.Kind.UNREACHABLE)
@@ -251,25 +257,13 @@ internal class LauncherClient {
         }
         val errorStream = connection.errorStream
         val body = errorStream?.use { readLimited(it, JSON_LIMIT).toString(Charsets.UTF_8) }.orEmpty()
-        throw when (code) {
-            401 -> LauncherCallException(
-                if (pairing) LauncherCallException.Kind.WRONG_PIN else LauncherCallException.Kind.UNAUTHORIZED,
-            )
-            403 -> LauncherCallException(
-                if (pairing) LauncherCallException.Kind.WRONG_PIN else LauncherCallException.Kind.NOT_HOME,
-            )
-            400 -> LauncherCallException(
-                when {
-                    wallpaper -> LauncherCallException.Kind.BAD_WALLPAPER
-                    pairing -> LauncherCallException.Kind.WRONG_PIN
-                    else -> LauncherCallException.Kind.FAILED
-                },
-            )
-            404, 409, 500, 502, 503 -> LauncherCallException(LauncherCallException.Kind.NOT_HOME)
-            else -> LauncherCallException(
-                if (body.isBlank()) LauncherCallException.Kind.FAILED else LauncherCallException.Kind.NOT_HOME,
-            )
-        }
+        throw mapLauncherHttpStatus(
+            code = code,
+            pairing = pairing,
+            wallpaper = wallpaper,
+            bodyBlank = body.isBlank(),
+            retryAfterHeader = connection.getHeaderField("Retry-After"),
+        )
     }
 
     private fun mapIo(error: IOException): LauncherCallException {
@@ -307,6 +301,50 @@ internal class LauncherClient {
         const val JSON_LIMIT = 512 * 1024
         const val ICON_LIMIT = 256 * 1024
     }
+}
+
+internal fun mapLauncherHttpStatus(
+    code: Int,
+    pairing: Boolean,
+    wallpaper: Boolean,
+    bodyBlank: Boolean,
+    retryAfterHeader: String?,
+): LauncherCallException {
+    return when (code) {
+        429 -> if (pairing) {
+            LauncherCallException(
+                LauncherCallException.Kind.LOCKED,
+                retryAfterSeconds(retryAfterHeader),
+            )
+        } else {
+            blankOrHome(bodyBlank)
+        }
+        401 -> LauncherCallException(
+            if (pairing) LauncherCallException.Kind.WRONG_PIN else LauncherCallException.Kind.UNAUTHORIZED,
+        )
+        403 -> LauncherCallException(
+            if (pairing) LauncherCallException.Kind.PAIRING_CLOSED else LauncherCallException.Kind.NOT_HOME,
+        )
+        400 -> LauncherCallException(
+            when {
+                wallpaper -> LauncherCallException.Kind.BAD_WALLPAPER
+                pairing -> LauncherCallException.Kind.WRONG_PIN
+                else -> LauncherCallException.Kind.FAILED
+            },
+        )
+        404, 409, 500, 502, 503 -> LauncherCallException(LauncherCallException.Kind.NOT_HOME)
+        else -> blankOrHome(bodyBlank)
+    }
+}
+
+internal fun retryAfterSeconds(header: String?): Int {
+    return header?.trim()?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+}
+
+private fun blankOrHome(bodyBlank: Boolean): LauncherCallException {
+    return LauncherCallException(
+        if (bodyBlank) LauncherCallException.Kind.FAILED else LauncherCallException.Kind.NOT_HOME,
+    )
 }
 
 internal fun parseState(json: String): LauncherSnapshot {

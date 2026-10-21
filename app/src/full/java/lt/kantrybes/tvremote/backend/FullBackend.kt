@@ -220,6 +220,7 @@ private class FullDiscovery(app: Application) : TvDiscovery {
             override fun openAndRequestCode() = session.openAndRequestCode()
             override fun submitCode(pairingCode: String) = session.submitCode(pairingCode)
             override fun close() = session.close()
+            override fun serverFingerprint(): ByteArray? = session.serverFingerprint()
         }
     }
 }

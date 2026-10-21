@@ -4,6 +4,7 @@ import android.util.Log
 import dadb.AdbKeyPair
 import dadb.AdbStream
 import dadb.Dadb
+import lt.kantrybes.tvremote.data.remote.TvAddress
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import java.io.File
@@ -25,7 +26,8 @@ internal class AdbClient(private val keyDirectory: File) {
     private var keyPair: AdbKeyPair? = null
 
     fun isReady(host: String): Boolean = synchronized(lock) {
-        dadb != null && this.host == host
+        val ip = runCatching { TvAddress.requireIpv4(host) }.getOrNull()
+        dadb != null && ip != null && this.host == ip
     }
 
     /**
@@ -33,13 +35,15 @@ internal class AdbClient(private val keyDirectory: File) {
      * read timeout would drop a mirror that sits on a still screen.
      */
     fun openDedicated(host: String, socketTimeoutMs: Int): Dadb {
+        val ip = TvAddress.requireIpv4(host)
         val keys = synchronized(lock) { loadKeyPair() }
-        return Dadb.create(host, PORT, keys, CONNECT_TIMEOUT_MS, socketTimeoutMs, true)
+        return Dadb.create(ip, PORT, keys, CONNECT_TIMEOUT_MS, socketTimeoutMs, true)
     }
 
     fun connection(host: String, socketTimeoutMs: Int = HANDSHAKE_READ_TIMEOUT_MS): Dadb = synchronized(lock) {
+        val ip = TvAddress.requireIpv4(host)
         val existing = dadb
-        if (existing != null && this.host == host) return existing
+        if (existing != null && this.host == ip) return existing
         try {
             existing?.close()
         } catch (error: Exception) {
@@ -48,7 +52,7 @@ internal class AdbClient(private val keyDirectory: File) {
         dadb = null
         this.host = null
         val created = Dadb.create(
-            host,
+            ip,
             PORT,
             loadKeyPair(),
             CONNECT_TIMEOUT_MS,
@@ -56,7 +60,7 @@ internal class AdbClient(private val keyDirectory: File) {
             true,
         )
         dadb = created
-        this.host = host
+        this.host = ip
         created
     }
 

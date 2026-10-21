@@ -23,6 +23,21 @@ internal object TvAddress {
         if (!IPV4.matches(trimmed)) {
             throw InvalidTvAddressException(InvalidTvAddressException.Kind.INVALID)
         }
+        if (!isPrivateLan(trimmed)) {
+            throw InvalidTvAddressException(InvalidTvAddressException.Kind.NOT_PRIVATE)
+        }
         return trimmed
+    }
+
+    /** 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, and 169.254.0.0/16. */
+    private fun isPrivateLan(host: String): Boolean {
+        val octets = host.split('.').map { it.toInt() }
+        if (octets.size != 4) return false
+        val first = octets[0]
+        val second = octets[1]
+        return first == 10 ||
+            (first == 172 && second in 16..31) ||
+            (first == 192 && second == 168) ||
+            (first == 169 && second == 254)
     }
 }

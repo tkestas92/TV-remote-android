@@ -1,8 +1,13 @@
 package lt.kantrybes.tvremote.data.remote
 
 internal class InvalidTvAddressException(val kind: Kind) : Exception() {
-    enum class Kind { EMPTY, INVALID }
+    enum class Kind { EMPTY, INVALID, NOT_PRIVATE }
 }
+
+/** Thrown from the TLS trust manager when the TV certificate does not match the pin. */
+internal class TvCertificateChangedException : java.security.cert.CertificateException(
+    "TV certificate changed",
+)
 
 internal class CannotConnectException(
     val kind: Kind,

@@ -242,12 +242,13 @@ internal fun RemoteScreen(
                 }
             }
             if (connection is RemoteConnectionState.NeedsPairing) {
+                val needs = connection as RemoteConnectionState.NeedsPairing
                 Text(
                     text = stringResource(
-                        if ((connection as RemoteConnectionState.NeedsPairing).rejected) {
-                            R.string.pairing_rejected
-                        } else {
-                            R.string.connection_needs_pairing
+                        when {
+                            needs.certificateChanged -> R.string.certificate_changed
+                            needs.rejected -> R.string.pairing_rejected
+                            else -> R.string.connection_needs_pairing
                         },
                     ),
                     color = MaterialTheme.colorScheme.error,
@@ -435,7 +436,11 @@ private fun connectionLabel(state: RemoteConnectionState): String {
         RemoteConnectionState.Reconnecting -> stringResource(R.string.connection_waking)
         RemoteConnectionState.Disconnected -> stringResource(R.string.connection_disconnected)
         is RemoteConnectionState.NeedsPairing -> stringResource(
-            if (state.rejected) R.string.pairing_rejected else R.string.connection_needs_pairing,
+            when {
+                state.certificateChanged -> R.string.certificate_changed
+                state.rejected -> R.string.pairing_rejected
+                else -> R.string.connection_needs_pairing
+            },
         )
     }
 }

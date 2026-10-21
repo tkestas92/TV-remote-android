@@ -38,6 +38,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +62,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import lt.kantrybes.tvremote.R
@@ -82,8 +86,26 @@ internal fun LauncherScreen(
     val generation by viewModel.iconGeneration.collectAsStateWithLifecycle()
     val pending = (state as? LauncherUiState.Manager)?.pending == true
     val haptics = LocalHapticFeedback.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var menuOpen by remember { mutableStateOf(false) }
     BackHandler(onBack = onClose)
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> viewModel.onLauncherVisible(true)
+                Lifecycle.Event.ON_PAUSE -> viewModel.onLauncherVisible(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            viewModel.onLauncherVisible(true)
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.onLauncherVisible(false)
+        }
+    }
     LaunchedEffect(pending) {
         if (pending) network.request { viewModel.ensureLoaded() }
     }
@@ -234,7 +256,7 @@ private fun PairingForm(
         Button(
             onClick = onConnect,
             modifier = Modifier.fillMaxWidth(),
-            enabled = !state.busy && state.ip.isNotBlank(),
+            enabled = !state.busy && state.ip.isNotBlank() && state.lockSeconds <= 0,
         ) {
             if (state.busy) {
                 val description = stringResource(R.string.working)

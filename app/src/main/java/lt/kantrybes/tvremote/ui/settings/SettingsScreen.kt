@@ -299,7 +299,7 @@ internal fun SettingsContent(
                 text = PairingStatus(state),
                 color = when {
                     state.pairingState is PairingState.Failed -> MaterialTheme.colorScheme.error
-                    state.credentialsRejected -> MaterialTheme.colorScheme.error
+                    state.credentialsRejected || state.certificateChanged -> MaterialTheme.colorScheme.error
                     state.isPaired || state.pairingState is PairingState.Succeeded ->
                         MaterialTheme.colorScheme.primary
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -423,6 +423,7 @@ private fun PairingStatus(state: SettingsUiState): String {
             stringResource(R.string.status_waiting_for_code)
         is PairingState.Failed -> pairing.message
         PairingState.Succeeded, PairingState.Idle -> when {
+            state.certificateChanged -> stringResource(R.string.certificate_changed)
             state.credentialsRejected -> stringResource(R.string.pairing_rejected)
             state.isPaired -> stringResource(R.string.status_paired)
             else -> stringResource(R.string.status_not_paired)

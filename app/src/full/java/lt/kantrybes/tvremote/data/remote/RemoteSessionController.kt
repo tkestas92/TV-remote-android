@@ -52,6 +52,7 @@ internal class RemoteSessionController(
     private var collectJob: kotlinx.coroutines.Job? = null
     @Volatile private var wanted = false
     @Volatile private var credentialsRejected = false
+    @Volatile private var certificateChanged = false
     @Volatile private var processStarted = false
     @Volatile private var keepAlive = false
 
@@ -85,6 +86,7 @@ internal class RemoteSessionController(
 
     fun ensureRunning() {
         credentialsRejected = false
+        certificateChanged = false
         wanted = true
         if (processStarted && _state.value is RemoteConnectionState.Disconnected) {
             _state.value = RemoteConnectionState.Connecting
@@ -205,6 +207,11 @@ internal class RemoteSessionController(
             _state.value = RemoteConnectionState.NeedsPairing()
             return
         }
+        if (certificateChanged) {
+            shutdownLocked()
+            _state.value = RemoteConnectionState.NeedsPairing(certificateChanged = true)
+            return
+        }
         if (credentialsRejected) {
             shutdownLocked()
             _state.value = RemoteConnectionState.NeedsPairing(rejected = true)
@@ -226,6 +233,12 @@ internal class RemoteSessionController(
                 _state.value = RemoteConnectionState.NeedsPairing(rejected = true)
                 scheduleApply()
             },
+            onCertificateChanged = {
+                certificateChanged = true
+                _state.value = RemoteConnectionState.NeedsPairing(certificateChanged = true)
+                scheduleApply()
+            },
+            pinnedSha256 = settings.serverPin(host),
         )
         session = created
         sessionHost = host

@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +41,7 @@ internal sealed interface LauncherUiState {
         val showPin: Boolean,
         val busy: Boolean,
         val error: String?,
+        val lockSeconds: Int = 0,
     ) : LauncherUiState
 
     data class Manager(
@@ -75,6 +77,8 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
     private var favoritesJob: Job? = null
     private var hiddenJob: Job? = null
     private var loadJob: Job? = null
+    private var lockJob: Job? = null
+    private var watchJob: Job? = null
     private var editGeneration = 0
     private val loadStarted = AtomicBoolean(false)
     private val signingOut = AtomicBoolean(false)
@@ -104,12 +108,12 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
 
     fun onIpChange(value: String) {
         val pairing = _state.value as? LauncherUiState.Pairing ?: return
-        _state.value = pairing.copy(ip = value, error = null)
+        _state.value = pairing.copy(ip = value, error = if (pairing.lockSeconds > 0) pairing.error else null)
     }
 
     fun onPinChange(value: String) {
         val pairing = _state.value as? LauncherUiState.Pairing ?: return
-        _state.value = pairing.copy(pin = value, error = null)
+        _state.value = pairing.copy(pin = value, error = if (pairing.lockSeconds > 0) pairing.error else null)
     }
 
     fun onQueryChange(value: String) {
@@ -119,7 +123,7 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
 
     fun connect() {
         val pairing = _state.value as? LauncherUiState.Pairing ?: return
-        if (pairing.busy) return
+        if (pairing.busy || pairing.lockSeconds > 0) return
         viewModelScope.launch {
             if (BuildConfig.IS_DEMO) {
                 _state.value = pairing.copy(busy = false, error = demoMessage())
@@ -160,12 +164,35 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
             } catch (error: CancellationException) {
                 throw error
             } catch (error: LauncherCallException) {
+                if (error.kind == LauncherCallException.Kind.LOCKED) {
+                    startLock(ip, error.retryAfterSeconds)
+                    return@launch
+                }
+                lockJob?.cancel()
                 val kind = if (error.kind == LauncherCallException.Kind.UNAUTHORIZED) {
                     LauncherCallException.Kind.WRONG_PIN
                 } else {
                     error.kind
                 }
-                _state.value = pairing.copy(ip = ip, showPin = true, busy = false, error = text(kind))
+                _state.value = pairing.copy(
+                    ip = ip,
+                    showPin = true,
+                    busy = false,
+                    error = text(kind),
+                    lockSeconds = 0,
+                )
+            }
+        }
+    }
+
+    fun onLauncherVisible(visible: Boolean) {
+        watchJob?.cancel()
+        watchJob = null
+        if (!visible || BuildConfig.IS_DEMO) return
+        watchJob = viewModelScope.launch {
+            while (currentCoroutineContext().isActive) {
+                checkToken()
+                delay(TOKEN_WATCH_MS)
             }
         }
     }
@@ -446,7 +473,22 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
         }
     }
 
-    private suspend fun signOut() {
+    private suspend fun checkToken() {
+        val hostNow = host
+        val tokenNow = token
+        if (hostNow.isBlank() || tokenNow.isBlank()) return
+        try {
+            withContext(Dispatchers.IO) { api.state(hostNow, tokenNow) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: LauncherCallException) {
+            if (error.kind == LauncherCallException.Kind.UNAUTHORIZED && token == tokenNow) {
+                withContext(NonCancellable) { signOut(text(R.string.launcher_error_removed)) }
+            }
+        }
+    }
+
+    private suspend fun signOut(message: String = text(R.string.launcher_error_token)) {
         if (!signingOut.compareAndSet(false, true)) return
         favoritesJob?.cancel()
         hiddenJob?.cancel()
@@ -460,7 +502,7 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
             pin = "",
             showPin = true,
             busy = false,
-            error = text(R.string.launcher_error_token),
+            error = message,
         )
     }
 
@@ -501,16 +543,52 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
         return scaled
     }
 
-    private fun text(kind: LauncherCallException.Kind): String {
-        val res = when (kind) {
-            LauncherCallException.Kind.UNREACHABLE -> R.string.launcher_error_unreachable
-            LauncherCallException.Kind.NOT_HOME -> R.string.launcher_error_home
-            LauncherCallException.Kind.WRONG_PIN -> R.string.launcher_error_pin
-            LauncherCallException.Kind.UNAUTHORIZED -> R.string.launcher_error_token
-            LauncherCallException.Kind.BAD_WALLPAPER -> R.string.launcher_error_wallpaper
-            LauncherCallException.Kind.FAILED -> R.string.launcher_error_generic
+    private fun startLock(ip: String, seconds: Int) {
+        lockJob?.cancel()
+        val wait = seconds.coerceAtLeast(0)
+        if (wait == 0) {
+            val current = _state.value as? LauncherUiState.Pairing ?: return
+            _state.value = current.copy(
+                ip = ip,
+                showPin = true,
+                busy = false,
+                error = text(LauncherCallException.Kind.LOCKED, 0),
+                lockSeconds = 0,
+            )
+            return
         }
-        return text(res)
+        lockJob = viewModelScope.launch {
+            var remaining = wait
+            while (remaining > 0) {
+                val current = _state.value as? LauncherUiState.Pairing ?: return@launch
+                _state.value = current.copy(
+                    showPin = true,
+                    busy = false,
+                    error = text(LauncherCallException.Kind.LOCKED, remaining),
+                    lockSeconds = remaining,
+                )
+                delay(1_000)
+                remaining--
+            }
+            val current = _state.value as? LauncherUiState.Pairing ?: return@launch
+            if (current.lockSeconds > 0) {
+                _state.value = current.copy(error = null, lockSeconds = 0)
+            }
+        }
+    }
+
+    private fun text(kind: LauncherCallException.Kind, retryAfterSeconds: Int = 0): String {
+        val app = getApplication<Application>()
+        return when (kind) {
+            LauncherCallException.Kind.LOCKED -> app.getString(R.string.launcher_error_locked, retryAfterSeconds)
+            LauncherCallException.Kind.UNREACHABLE -> text(R.string.launcher_error_unreachable)
+            LauncherCallException.Kind.NOT_HOME -> text(R.string.launcher_error_home)
+            LauncherCallException.Kind.WRONG_PIN -> text(R.string.launcher_error_pin)
+            LauncherCallException.Kind.UNAUTHORIZED -> text(R.string.launcher_error_token)
+            LauncherCallException.Kind.BAD_WALLPAPER -> text(R.string.launcher_error_wallpaper)
+            LauncherCallException.Kind.FAILED -> text(R.string.launcher_error_generic)
+            LauncherCallException.Kind.PAIRING_CLOSED -> text(R.string.launcher_error_pairing_closed)
+        }
     }
 
     private fun text(res: Int) = getApplication<Application>().getString(res)
@@ -520,13 +598,16 @@ internal class LauncherViewModel(application: Application) : AndroidViewModel(ap
     private fun ipError(error: InvalidTvAddressException): String {
         val res = when (error.kind) {
             InvalidTvAddressException.Kind.EMPTY -> R.string.error_ip_empty
-            InvalidTvAddressException.Kind.INVALID -> R.string.error_ip_invalid
+            InvalidTvAddressException.Kind.INVALID,
+            InvalidTvAddressException.Kind.NOT_PRIVATE,
+            -> R.string.error_ip_invalid
         }
         return text(res)
     }
 
     private companion object {
         const val FAVORITES_DEBOUNCE_MS = 500L
+        const val TOKEN_WATCH_MS = 5_000L
         const val MAX_ICON_WIDTH = 160f
         const val MAX_ICON_HEIGHT = 90f
     }

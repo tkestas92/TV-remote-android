@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import kotlinx.coroutines.launch
@@ -16,6 +17,12 @@ import lt.kantrybes.tvremote.data.settings.SettingsRepository
 class ShareActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The share sheet uses startActivity, so getCallingActivity() is null for a normal
+        // share. Ignoring a null caller would drop those requests.
+        if (!reserveOpen()) {
+            finish()
+            return
+        }
         val startedAt = System.currentTimeMillis()
         val shared = intent?.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
         val url = YouTubeShare.find(shared)
@@ -36,5 +43,19 @@ class ShareActivity : ComponentActivity() {
             }
         }
         finish()
+    }
+
+    private companion object {
+        const val OPEN_INTERVAL_MS = 2_000L
+        private var lastOpenAt = 0L
+
+        fun reserveOpen(): Boolean {
+            val now = SystemClock.elapsedRealtime()
+            synchronized(this) {
+                if (now - lastOpenAt < OPEN_INTERVAL_MS) return false
+                lastOpenAt = now
+                return true
+            }
+        }
     }
 }

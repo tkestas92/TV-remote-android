@@ -85,6 +85,7 @@ internal interface TvPairing {
     fun openAndRequestCode()
     fun submitCode(pairingCode: String)
     fun close()
+    fun serverFingerprint(): ByteArray? = null
 }
 
 internal interface TvDiscovery {

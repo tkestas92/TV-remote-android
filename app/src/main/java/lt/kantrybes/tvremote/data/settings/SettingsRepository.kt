@@ -39,14 +39,42 @@ internal class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setTvIp(ip: String) {
+        val trimmed = ip.trim()
+        if (isPublicAddress(trimmed)) return
         context.settingsDataStore.edit { prefs ->
-            prefs[Keys.TV_IP] = ip.trim()
+            prefs[Keys.TV_IP] = trimmed
         }
     }
 
     suspend fun setPairedHost(host: String) {
+        val trimmed = host.trim()
+        val previous = read().pairedHost
         context.settingsDataStore.edit { prefs ->
-            prefs[Keys.PAIRED_HOST] = host.trim()
+            prefs[Keys.PAIRED_HOST] = trimmed
+        }
+        if (trimmed.isEmpty() && previous.isNotBlank()) {
+            clearServerPin(previous)
+        }
+    }
+
+    suspend fun serverPin(host: String): ByteArray? {
+        val key = Keys.serverPin(host) ?: return null
+        val stored = context.settingsDataStore.data.first()[key]?.takeIf { it.isNotBlank() } ?: return null
+        return decodePin(stored) ?: ByteArray(0)
+    }
+
+    suspend fun setServerPin(host: String, fingerprint: ByteArray) {
+        val key = Keys.serverPin(host) ?: return
+        val encoded = fingerprint.toPinHex()
+        context.settingsDataStore.edit { prefs ->
+            prefs[key] = encoded
+        }
+    }
+
+    suspend fun clearServerPin(host: String) {
+        val key = Keys.serverPin(host) ?: return
+        context.settingsDataStore.edit { prefs ->
+            prefs.remove(key)
         }
     }
 
@@ -232,9 +260,40 @@ internal class SettingsRepository(private val context: Context) {
         } catch (_: InvalidTvAddressException) {
             null
         }
+
+        fun serverPin(host: String) = try {
+            stringPreferencesKey("server_pin_${TvAddress.requireIpv4(host)}")
+        } catch (_: InvalidTvAddressException) {
+            null
+        }
+    }
+
+    private fun isPublicAddress(value: String): Boolean {
+        if (value.isEmpty()) return false
+        return try {
+            TvAddress.requireIpv4(value)
+            false
+        } catch (error: InvalidTvAddressException) {
+            error.kind == InvalidTvAddressException.Kind.NOT_PRIVATE
+        }
     }
 
     private companion object {
         const val DEFAULT_PICTURE_VALUE = 50
     }
+}
+
+private fun ByteArray.toPinHex(): String {
+    return joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+}
+
+private fun decodePin(hex: String): ByteArray? {
+    if (hex.length != 64) return null
+    val out = ByteArray(32)
+    for (index in out.indices) {
+        val start = index * 2
+        val byte = hex.substring(start, start + 2).toIntOrNull(16) ?: return null
+        out[index] = byte.toByte()
+    }
+    return out
 }

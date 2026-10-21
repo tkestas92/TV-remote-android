@@ -37,6 +37,8 @@ internal class RemoteSession(
     private val consumePendingPower: () -> Boolean,
     private val onReady: () -> Unit,
     private val onCredentialsRejected: () -> Unit = {},
+    private val onCertificateChanged: () -> Unit = {},
+    private val pinnedSha256: ByteArray? = null,
 ) {
     private val _state = MutableStateFlow<RemoteConnectionState>(RemoteConnectionState.Connecting)
     val state: StateFlow<RemoteConnectionState> = _state.asStateFlow()
@@ -230,8 +232,15 @@ internal class RemoteSession(
                 readTimeoutMs = READ_TIMEOUT_MS,
                 socketFactory = wifi.socketFactory(),
                 onSocket = ::trackSocket,
+                pinnedSha256 = pinnedSha256,
             )
         } catch (error: CannotConnectException) {
+            if (error.kind == CannotConnectException.Kind.TLS && tlsCertificateChanged(error)) {
+                Log.w(TAG, "TV certificate changed")
+                _state.value = RemoteConnectionState.NeedsPairing(certificateChanged = true)
+                onCertificateChanged()
+                return
+            }
             if (error.kind == CannotConnectException.Kind.TLS && tlsRejectsClientCertificate(error)) {
                 Log.w(TAG, "TV rejected the stored certificate")
                 _state.value = RemoteConnectionState.NeedsPairing(rejected = true)
@@ -374,6 +383,15 @@ internal class RemoteSession(
         const val LIVENESS_POLL_MS = 1_000L
         const val RETRY_INTERVAL_MS = 2_000L
     }
+}
+
+internal fun tlsCertificateChanged(error: Throwable): Boolean {
+    var current: Throwable? = error
+    while (current != null) {
+        if (current is TvCertificateChangedException) return true
+        current = current.cause
+    }
+    return false
 }
 
 internal fun tlsRejectsClientCertificate(error: Throwable): Boolean {

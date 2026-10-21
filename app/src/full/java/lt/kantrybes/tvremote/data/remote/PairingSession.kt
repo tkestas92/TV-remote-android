@@ -6,6 +6,7 @@ import com.google.protobuf.ByteString
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLSocket
 
@@ -77,6 +78,11 @@ internal class PairingSession(
             throw PairingProtocolException(PairingProtocolException.Kind.CLOSED, error)
         }
         close()
+    }
+
+    fun serverFingerprint(): ByteArray? {
+        val certificate = serverCertificate ?: return null
+        return MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
     }
 
     fun close() {

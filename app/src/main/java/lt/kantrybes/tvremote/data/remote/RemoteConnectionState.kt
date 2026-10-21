@@ -5,5 +5,8 @@ internal sealed interface RemoteConnectionState {
     data object Connecting : RemoteConnectionState
     data object Connected : RemoteConnectionState
     data object Reconnecting : RemoteConnectionState
-    data class NeedsPairing(val rejected: Boolean = false) : RemoteConnectionState
+    data class NeedsPairing(
+        val rejected: Boolean = false,
+        val certificateChanged: Boolean = false,
+    ) : RemoteConnectionState
 }

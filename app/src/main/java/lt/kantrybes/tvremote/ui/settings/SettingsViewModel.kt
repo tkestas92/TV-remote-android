@@ -208,7 +208,12 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
                 withContext(Dispatchers.IO) { current.submitCode(code) }
                 if (generation != pairingGeneration) return@launch
                 val host = _state.value.tvIp.trim()
+                current.serverFingerprint()?.let { fingerprint ->
+                    settings.clearServerPin(host)
+                    settings.setServerPin(host, fingerprint)
+                }
                 settings.setPairedHost(host)
+                (getApplication() as TvRemoteApplication).remote.ensureRunning()
                 session = null
                 _state.update {
                     it.copy(
@@ -265,7 +270,9 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
         return when (error) {
             is InvalidTvAddressException -> when (error.kind) {
                 InvalidTvAddressException.Kind.EMPTY -> app.getString(R.string.error_ip_empty)
-                InvalidTvAddressException.Kind.INVALID -> app.getString(R.string.error_ip_invalid)
+                InvalidTvAddressException.Kind.INVALID,
+                InvalidTvAddressException.Kind.NOT_PRIVATE,
+                -> app.getString(R.string.error_ip_invalid)
             }
             is CannotConnectException -> when (error.kind) {
                 CannotConnectException.Kind.TIMEOUT -> app.getString(R.string.error_timeout)
@@ -316,6 +323,9 @@ internal data class SettingsUiState(
 
     val credentialsRejected: Boolean
         get() = (remoteConnection as? RemoteConnectionState.NeedsPairing)?.rejected == true
+
+    val certificateChanged: Boolean
+        get() = (remoteConnection as? RemoteConnectionState.NeedsPairing)?.certificateChanged == true
 
     val pairingInProgress: Boolean
         get() = pairingState is PairingState.Connecting ||

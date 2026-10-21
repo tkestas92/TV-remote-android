@@ -5,9 +5,11 @@ import java.net.ConnectException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.security.MessageDigest
 import java.security.Principal
 import java.security.PrivateKey
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import javax.net.SocketFactory
 import javax.net.ssl.SSLContext
@@ -31,9 +33,10 @@ internal fun connectTls(
     handshakeTimeoutMs: Int = if (readTimeoutMs == 0) DEFAULT_HANDSHAKE_TIMEOUT_MS else readTimeoutMs,
     socketFactory: SocketFactory = SocketFactory.getDefault(),
     onSocket: (Socket) -> Unit = {},
+    pinnedSha256: ByteArray? = null,
 ): TlsConnection {
     val ip = TvAddress.requireIpv4(host)
-    val trustManager = CaptureTrustManager()
+    val trustManager = CaptureTrustManager(pinnedSha256)
     val sslContext = SSLContext.getInstance("TLS")
     sslContext.init(
         arrayOf(FixedClientKeyManager(identity.privateKey, identity.certificate)),
@@ -122,7 +125,9 @@ private class FixedClientKeyManager(
     }
 }
 
-private class CaptureTrustManager : X509ExtendedTrustManager() {
+private class CaptureTrustManager(
+    private val pinnedSha256: ByteArray?,
+) : X509ExtendedTrustManager() {
     var serverCertificate: X509Certificate? = null
 
     override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
@@ -162,6 +167,15 @@ private class CaptureTrustManager : X509ExtendedTrustManager() {
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
 
     private fun capture(chain: Array<out X509Certificate>?) {
-        serverCertificate = chain?.firstOrNull()
+        val certificate = chain?.firstOrNull()
+        serverCertificate = certificate
+        val expected = pinnedSha256 ?: return
+        if (certificate == null) {
+            throw CertificateException("TV certificate missing")
+        }
+        val actual = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
+        if (!MessageDigest.isEqual(expected, actual)) {
+            throw TvCertificateChangedException()
+        }
     }
 }

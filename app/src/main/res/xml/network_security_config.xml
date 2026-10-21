@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher API is plain HTTP to a raw private LAN IP. domain-config matches
+  host names only, not IP literals, so cleartext cannot be limited to those
+  addresses here. HttpURLConnection to http://192.168.x.x needs cleartext
+  permitted on the base-config. TvAddress.requireIpv4 rejects any address that
+  is not private before a request is opened.
+-->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

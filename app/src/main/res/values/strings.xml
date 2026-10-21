@@ -69,6 +69,7 @@
     <string name="connection_disconnected">Disconnected</string>
     <string name="connection_needs_pairing">This TV is not paired.</string>
     <string name="pairing_rejected">The TV rejected the saved pairing. Pair again.</string>
+    <string name="certificate_changed">TV certificate changed — pair again</string>
     <string name="key_up">Up</string>
     <string name="key_down">Down</string>
     <string name="key_left">Left</string>
@@ -140,10 +141,13 @@
     <string name="launcher_down">Down</string>
     <string name="launcher_error_unreachable">Cannot reach the TV.</string>
     <string name="launcher_error_pin">Wrong PIN.</string>
+    <string name="launcher_error_locked">Too many wrong codes. Try again in %1$d seconds.</string>
+    <string name="launcher_error_pairing_closed">Open Settings &gt; Phone on the TV first.</string>
     <string name="launcher_error_pin_empty">Enter the PIN shown on the TV.</string>
     <string name="launcher_error_home">Open Home on the TV and try again.</string>
     <string name="launcher_error_wallpaper">That wallpaper is not available.</string>
     <string name="launcher_error_token">Sign in again with the PIN shown on the TV.</string>
+    <string name="launcher_error_removed">This phone was removed on the TV. Pair again.</string>
     <string name="launcher_error_generic">Something went wrong.</string>
     <string name="launcher_wallpaper_night">Night</string>
     <string name="launcher_wallpaper_aurora">Aurora</string>
