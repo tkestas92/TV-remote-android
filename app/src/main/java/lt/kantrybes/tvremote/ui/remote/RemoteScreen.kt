@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -27,7 +28,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,6 +41,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.res.painterResource
@@ -57,12 +58,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import lt.kantrybes.tvremote.BuildConfig
 import lt.kantrybes.tvremote.R
+import lt.kantrybes.tvremote.TvRemoteApplication
 import lt.kantrybes.tvremote.data.settings.ControlMode
 import lt.kantrybes.tvremote.data.settings.PictureSlider
 import lt.kantrybes.tvremote.data.remote.KeyPress
 import lt.kantrybes.tvremote.data.remote.RemoteConnectionState
 import lt.kantrybes.tvremote.data.remote.TvKey
+import lt.kantrybes.tvremote.ui.demo.DemoChip
+import lt.kantrybes.tvremote.ui.demo.VirtualTv
 import lt.kantrybes.tvremote.ui.LocalNetworkAccess
 import lt.kantrybes.tvremote.ui.LocalNetworkDeniedMessage
 import lt.kantrybes.tvremote.ui.shortcuts.ShortcutEditDialog
@@ -72,7 +77,9 @@ import lt.kantrybes.tvremote.ui.shortcuts.ShortcutGrid
 @Composable
 internal fun RemoteScreen(
     network: LocalNetworkAccess,
+    active: Boolean,
     onOpenSettings: () -> Unit,
+    onOpenLauncher: () -> Unit,
     onOpenScreen: () -> Unit,
     viewModel: RemoteViewModel = viewModel(),
 ) {
@@ -86,14 +93,19 @@ internal fun RemoteScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var editingShortcut by rememberSaveable { mutableStateOf(-1) }
     val haptics = LocalHapticFeedback.current
+    val picture by (LocalContext.current.applicationContext as TvRemoteApplication)
+        .preview.picture.collectAsStateWithLifecycle()
+    LaunchedEffect(active) {
+        if (!active) {
+            keyboardOpen = false
+            editingShortcut = -1
+        }
+    }
     LaunchedEffect(network.granted) {
         if (network.granted) viewModel.start()
     }
     LaunchedEffect(Unit) {
         if (!network.granted) network.request()
-    }
-    DisposableEffect(Unit) {
-        onDispose { viewModel.stop() }
     }
     LaunchedEffect(adbMessage) {
         val message = adbMessage
@@ -116,7 +128,10 @@ internal fun RemoteScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(stringResource(R.string.app_name))
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(stringResource(R.string.app_name))
+                            DemoChip()
+                        }
                         Text(
                             text = connectionLabel(connection),
                             style = MaterialTheme.typography.labelMedium,
@@ -163,11 +178,22 @@ internal fun RemoteScreen(
                     IconButton(
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onOpenLauncher()
+                        },
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_launcher_apps),
+                            contentDescription = stringResource(R.string.launcher),
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             onOpenSettings()
                         },
                     ) {
                         Icon(
-                            painter = painterResource(R.drawable.ic_settings),
+                            painter = painterResource(R.drawable.ic_tune),
                             contentDescription = stringResource(R.string.open_settings),
                         )
                     }
@@ -184,6 +210,14 @@ internal fun RemoteScreen(
             verticalArrangement = Arrangement.spacedBy(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            if (BuildConfig.IS_DEMO && picture.shown) {
+                VirtualTv(
+                    picture = picture,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f),
+                )
+            }
             ShortcutGrid(
                 shortcuts = shortcuts,
                 onLaunch = viewModel::launchShortcut,
@@ -209,7 +243,13 @@ internal fun RemoteScreen(
             }
             if (connection is RemoteConnectionState.NeedsPairing) {
                 Text(
-                    text = stringResource(R.string.connection_needs_pairing),
+                    text = stringResource(
+                        if ((connection as RemoteConnectionState.NeedsPairing).rejected) {
+                            R.string.pairing_rejected
+                        } else {
+                            R.string.connection_needs_pairing
+                        },
+                    ),
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center,
                 )
@@ -388,11 +428,15 @@ private fun pictureSliderLabel(item: String): Int {
 @Composable
 private fun connectionLabel(state: RemoteConnectionState): String {
     return when (state) {
-        RemoteConnectionState.Connected -> stringResource(R.string.connection_connected)
+        RemoteConnectionState.Connected -> stringResource(
+            if (BuildConfig.IS_DEMO) R.string.connection_connected_demo else R.string.connection_connected,
+        )
         RemoteConnectionState.Connecting,
         RemoteConnectionState.Reconnecting -> stringResource(R.string.connection_waking)
         RemoteConnectionState.Disconnected -> stringResource(R.string.connection_disconnected)
-        RemoteConnectionState.NeedsPairing -> stringResource(R.string.connection_needs_pairing)
+        is RemoteConnectionState.NeedsPairing -> stringResource(
+            if (state.rejected) R.string.pairing_rejected else R.string.connection_needs_pairing,
+        )
     }
 }
 
@@ -400,7 +444,7 @@ private fun connectionLabel(state: RemoteConnectionState): String {
 private fun connectionColor(state: RemoteConnectionState): androidx.compose.ui.graphics.Color {
     return when (state) {
         RemoteConnectionState.Connected -> MaterialTheme.colorScheme.primary
-        RemoteConnectionState.NeedsPairing -> MaterialTheme.colorScheme.error
+        is RemoteConnectionState.NeedsPairing -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 }

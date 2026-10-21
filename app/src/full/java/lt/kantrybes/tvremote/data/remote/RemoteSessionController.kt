@@ -51,6 +51,7 @@ internal class RemoteSessionController(
     private val epoch = AtomicInteger(0)
     private var collectJob: kotlinx.coroutines.Job? = null
     @Volatile private var wanted = false
+    @Volatile private var credentialsRejected = false
     @Volatile private var processStarted = false
     @Volatile private var keepAlive = false
 
@@ -83,6 +84,7 @@ internal class RemoteSessionController(
     }
 
     fun ensureRunning() {
+        credentialsRejected = false
         wanted = true
         if (processStarted && _state.value is RemoteConnectionState.Disconnected) {
             _state.value = RemoteConnectionState.Connecting
@@ -200,7 +202,12 @@ internal class RemoteSessionController(
         }
         if (host.isBlank() || identity == null) {
             shutdownLocked()
-            _state.value = RemoteConnectionState.NeedsPairing
+            _state.value = RemoteConnectionState.NeedsPairing()
+            return
+        }
+        if (credentialsRejected) {
+            shutdownLocked()
+            _state.value = RemoteConnectionState.NeedsPairing(rejected = true)
             return
         }
         if (session?.isRunning == true && sessionEpoch == epoch.get() && sessionHost == host) return
@@ -214,6 +221,11 @@ internal class RemoteSessionController(
             macAddress = { WakeOnLan.resolveMac(settings.read().tvMac) },
             consumePendingPower = { pendingPower.compareAndSet(true, false) },
             onReady = { onSessionReady(host) },
+            onCredentialsRejected = {
+                credentialsRejected = true
+                _state.value = RemoteConnectionState.NeedsPairing(rejected = true)
+                scheduleApply()
+            },
         )
         session = created
         sessionHost = host

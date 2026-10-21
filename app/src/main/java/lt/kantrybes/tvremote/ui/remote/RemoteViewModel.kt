@@ -16,9 +16,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import lt.kantrybes.tvremote.R
 import lt.kantrybes.tvremote.TvRemoteApplication
-import lt.kantrybes.tvremote.data.adb.AppLauncher
-import lt.kantrybes.tvremote.data.adb.PictureController
-import lt.kantrybes.tvremote.data.adb.PictureMenu
 import lt.kantrybes.tvremote.data.adb.TextSync
 import lt.kantrybes.tvremote.data.remote.RemoteConnectionState
 import lt.kantrybes.tvremote.data.remote.KeyPress
@@ -41,7 +38,7 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
     private val app = application as TvRemoteApplication
     private val settings = SettingsRepository(application)
     private val remote = app.remote
-    private val launcher = AppLauncher(app.adb, settings)
+    private val launcher = app.adb
     private val openingTicket = java.util.concurrent.atomic.AtomicInteger(0)
     private val launches = Mutex()
 
@@ -60,11 +57,6 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
     val pictureSliders: StateFlow<List<PictureSliderPref>> = _pictureSliders.asStateFlow()
     private val pictureLock = Mutex()
     private val pictureApplies = mutableMapOf<String, Int>()
-    private val pictures = PictureController { command ->
-        val host = settings.read().pairedHost
-        launcher.exec(host, command)
-    }
-
     private val _adbMessage = MutableStateFlow<AdbMessage?>(null)
     val adbMessage: StateFlow<AdbMessage?> = _adbMessage.asStateFlow()
 
@@ -111,10 +103,6 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
 
     fun start() {
         remote.ensureRunning()
-    }
-
-    fun stop() {
-        remote.stop()
     }
 
     fun sendKey(key: TvKey, press: KeyPress) {
@@ -244,7 +232,7 @@ internal class RemoteViewModel(application: Application) : AndroidViewModel(appl
             try {
                 pictureLock.withLock {
                     settings.setPictureValue(item, clamped)
-                    val applied = pictures.set(item, clamped)
+                    val applied = launcher.setPicture(item, clamped)
                     if (!applied) {
                         settings.setPictureValue(item, previous)
                         restorePictureValue(item, previous)

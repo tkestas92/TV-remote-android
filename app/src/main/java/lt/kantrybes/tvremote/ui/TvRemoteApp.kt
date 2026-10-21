@@ -11,8 +11,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import lt.kantrybes.tvremote.TvRemoteApplication
+import lt.kantrybes.tvremote.ui.demo.DemoIntroDialog
+import lt.kantrybes.tvremote.ui.launcher.LauncherScreen
 import lt.kantrybes.tvremote.ui.remote.RemoteScreen
 import lt.kantrybes.tvremote.ui.screen.ScreenScreen
 import lt.kantrybes.tvremote.ui.settings.PairingState
@@ -23,47 +27,55 @@ import lt.kantrybes.tvremote.ui.settings.SettingsViewModel
 internal fun TvRemoteApp() {
     val settingsViewModel: SettingsViewModel = viewModel()
     val settings by settingsViewModel.state.collectAsStateWithLifecycle()
-    var showRemote by rememberSaveable { mutableStateOf(false) }
+    var place by rememberSaveable { mutableStateOf(Place.Remote) }
     var showScreen by rememberSaveable { mutableStateOf(false) }
-    var decided by rememberSaveable { mutableStateOf(false) }
     val network = rememberLocalNetworkAccess()
+    val app = LocalContext.current.applicationContext as TvRemoteApplication
 
-    LaunchedEffect(settings.prefsLoaded) {
-        if (settings.prefsLoaded && !decided) {
-            showRemote = settings.pairedHost.isNotBlank()
-            decided = true
+    LaunchedEffect(settings.prefsLoaded, settings.pairedHost, network.granted) {
+        if (settings.prefsLoaded && settings.pairedHost.isNotBlank() && network.granted) {
+            app.remote.ensureRunning()
         }
     }
     LaunchedEffect(settings.pairingState) {
         if (settings.pairingState is PairingState.Succeeded) {
-            showRemote = true
+            place = Place.Remote
             showScreen = false
-            decided = true
         }
     }
 
-    if (!decided) {
+    if (!settings.prefsLoaded) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
         }
         return
     }
-    if (showRemote && showScreen) {
-        ScreenScreen(onClose = { showScreen = false })
-    } else if (showRemote) {
+    DemoIntroDialog()
+    Box(modifier = Modifier.fillMaxSize()) {
         RemoteScreen(
             network = network,
-            onOpenSettings = {
-                showScreen = false
-                showRemote = false
-            },
+            active = place == Place.Remote && !showScreen,
+            onOpenSettings = { place = Place.Settings },
+            onOpenLauncher = { place = Place.Launcher },
             onOpenScreen = { showScreen = true },
         )
-    } else {
-        SettingsScreen(
-            viewModel = settingsViewModel,
-            network = network,
-            onOpenRemote = { showRemote = true },
-        )
+        when {
+            showScreen -> ScreenScreen(onClose = { showScreen = false })
+            place == Place.Launcher -> LauncherScreen(
+                network = network,
+                onClose = { place = Place.Remote },
+            )
+            place == Place.Settings -> SettingsScreen(
+                viewModel = settingsViewModel,
+                network = network,
+                onClose = { place = Place.Remote },
+            )
+        }
     }
+}
+
+private enum class Place {
+    Remote,
+    Launcher,
+    Settings,
 }

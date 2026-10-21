@@ -9,7 +9,6 @@ import androidx.activity.ComponentActivity
 import kotlinx.coroutines.launch
 import lt.kantrybes.tvremote.R
 import lt.kantrybes.tvremote.TvRemoteApplication
-import lt.kantrybes.tvremote.data.adb.AppLauncher
 import lt.kantrybes.tvremote.data.adb.YouTubeShare
 import lt.kantrybes.tvremote.data.settings.SettingsRepository
 
@@ -29,7 +28,7 @@ class ShareActivity : ComponentActivity() {
         val app = application as TvRemoteApplication
         app.appScope.launch {
             val host = SettingsRepository(app).read().pairedHost
-            val opened = AppLauncher(app.adb).openYouTube(host, url, startedAt)
+            val opened = app.adb.openYouTube(host, url, startedAt)
             if (!opened) {
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(app, R.string.adb_failed, Toast.LENGTH_SHORT).show()

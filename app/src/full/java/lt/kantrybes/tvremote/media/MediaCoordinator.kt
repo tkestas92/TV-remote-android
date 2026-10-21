@@ -7,6 +7,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import lt.kantrybes.tvremote.TvRemoteApplication
+import lt.kantrybes.tvremote.backend.TvNowPlaying
+import lt.kantrybes.tvremote.backend.TvRemote
+import lt.kantrybes.tvremote.data.adb.AdbClient
 import lt.kantrybes.tvremote.data.adb.NowPlaying
 import lt.kantrybes.tvremote.data.adb.NowPlayingMonitor
 import lt.kantrybes.tvremote.data.remote.RemoteConnectionState
@@ -17,10 +20,14 @@ import lt.kantrybes.tvremote.data.settings.SettingsRepository
  * Stops it after 10 minutes of silence, 60 seconds without the TV, a settings
  * toggle, or the user dismissing the card.
  */
-internal class MediaCoordinator(private val app: TvRemoteApplication) {
+internal class MediaCoordinator(
+    private val app: TvRemoteApplication,
+    adb: AdbClient,
+    private val remote: TvRemote,
+) : TvNowPlaying {
     private val settings = SettingsRepository(app)
-    private val monitor = NowPlayingMonitor(app.adb, app.appScope, ::onSample)
-    val nowPlaying: StateFlow<NowPlaying?> = monitor.nowPlaying
+    private val monitor = NowPlayingMonitor(adb, app.appScope, ::onSample)
+    override val nowPlaying: StateFlow<NowPlaying?> = monitor.nowPlaying
 
     private var enabled = true
     private var sawConnected = false
@@ -28,24 +35,24 @@ internal class MediaCoordinator(private val app: TvRemoteApplication) {
     private var idleSince: Long? = null
     private var unreachableSince: Long? = null
 
-    fun start() {
+    override fun start() {
         app.appScope.launch {
-            combine(settings.showMediaControls(), app.remote.state) { show, state -> show to state }
+            combine(settings.showMediaControls(), remote.state) { show, state -> show to state }
                 .collect { (show, state) -> onConnection(show, state) }
         }
     }
 
-    fun stop(reason: String) {
+    override fun stop(reason: String) {
         if (!serviceRunning) return
         Log.i(TAG, "Service stop: $reason")
         serviceRunning = false
         idleSince = null
         unreachableSince = null
-        app.remote.setMediaKeepAlive(false)
+        remote.setMediaKeepAlive(false)
         app.stopService(Intent(app, TvMediaService::class.java))
     }
 
-    fun onServiceGone(reason: String) {
+    override fun onServiceGone(reason: String) {
         if (!serviceRunning) return
         stop(reason)
     }
@@ -96,19 +103,19 @@ internal class MediaCoordinator(private val app: TvRemoteApplication) {
 
     private fun maybeStart() {
         if (serviceRunning) return
-        if (!app.remote.processInForeground) {
+        if (!remote.processInForeground) {
             Log.i(TAG, "Not starting media service from the background")
             return
         }
         Log.i(TAG, "Service start: playing")
         serviceRunning = true
-        app.remote.setMediaKeepAlive(true)
+        remote.setMediaKeepAlive(true)
         try {
             ContextCompat.startForegroundService(app, Intent(app, TvMediaService::class.java))
         } catch (error: Exception) {
             Log.w(TAG, "Service start failed", error)
             serviceRunning = false
-            app.remote.setMediaKeepAlive(false)
+            remote.setMediaKeepAlive(false)
         }
     }
 

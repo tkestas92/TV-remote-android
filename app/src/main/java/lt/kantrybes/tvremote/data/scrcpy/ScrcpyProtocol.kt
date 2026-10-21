@@ -22,13 +22,12 @@ internal object ScrcpyProtocol {
     const val CODEC_H264 = 0x68323634
     const val TOUCH_LENGTH = 32
     const val TYPE_INJECT_TOUCH_EVENT = 2
+    /** scrcpy 4.1 ControlMessage.TYPE_RESET_VIDEO. The wire message is this byte alone. */
+    const val TYPE_RESET_VIDEO = 17
     const val ACTION_DOWN = 0
     const val ACTION_UP = 1
     const val ACTION_MOVE = 2
     const val POINTER_ID_FINGER = -2L
-    const val MAX_SIZE = 768
-    const val BIT_RATE = 2_500_000
-    const val MAX_FPS = 24
 
     private const val FLAG_SESSION = 1L shl 63
     private const val FLAG_CONFIG = 1L shl 62
@@ -42,10 +41,64 @@ internal object ScrcpyProtocol {
 
     fun socket(scid: String): String = "localabstract:scrcpy_$scid"
 
-    fun serverCommand(scid: String): String {
+    fun resetVideo(): ByteArray = byteArrayOf(TYPE_RESET_VIDEO.toByte())
+
+    /** Annex-B IDR, NAL type 5. A packet may carry several NALs. */
+    fun isIdrFrame(payload: ByteArray): Boolean {
+        var index = 0
+        while (index < payload.size) {
+            val marker = startCodeLength(payload, index)
+            if (marker == 0) {
+                index++
+                continue
+            }
+            val header = index + marker
+            if (header >= payload.size) return false
+            if ((payload[header].toInt() and 0x1F) == 5) return true
+            index = header + 1
+        }
+        return false
+    }
+
+    fun remoteJarMd5(output: String): String? {
+        val line = output.lineSequence()
+            .map { it.trim().lowercase() }
+            .firstOrNull { candidate ->
+                candidate.length >= 32 && candidate.take(32).all { it in '0'..'9' || it in 'a'..'f' }
+            } ?: return null
+        return line.take(32)
+    }
+
+    fun jarIsCurrent(remoteMd5: String?, remoteSize: Long?, assetMd5: String, assetSize: Long): Boolean {
+        if (remoteMd5 != null) return remoteMd5 == assetMd5.lowercase()
+        return remoteSize != null && remoteSize == assetSize
+    }
+
+    private fun startCodeLength(payload: ByteArray, index: Int): Int {
+        if (
+            index + 4 <= payload.size &&
+            payload[index] == 0.toByte() &&
+            payload[index + 1] == 0.toByte() &&
+            payload[index + 2] == 0.toByte() &&
+            payload[index + 3] == 1.toByte()
+        ) {
+            return 4
+        }
+        if (
+            index + 3 <= payload.size &&
+            payload[index] == 0.toByte() &&
+            payload[index + 1] == 0.toByte() &&
+            payload[index + 2] == 1.toByte()
+        ) {
+            return 3
+        }
+        return 0
+    }
+
+    fun serverCommand(scid: String, preset: MirrorPreset = MirrorPreset.Smooth): String {
         return "export CLASSPATH=$REMOTE_JAR; app_process / com.genymobile.scrcpy.Server $VERSION " +
             "scid=$scid tunnel_forward=true audio=false control=true " +
-            "max_size=$MAX_SIZE video_bit_rate=$BIT_RATE max_fps=$MAX_FPS video_codec=h264"
+            "max_size=${preset.maxSize} video_bit_rate=${preset.bitRate} max_fps=${preset.maxFps} video_codec=h264"
     }
 
     fun coalesceMoves(messages: List<ControlMsg>): List<ControlMsg> {
@@ -157,6 +210,49 @@ internal object ScrcpyProtocol {
         }
         return value
     }
+}
+
+/**
+ * Software-encoder sizes. [maxSize] is the long edge; a 16:9 TV becomes
+ * [maxSize] by [maxSize] * 9 / 16, and both stay multiples of 16.
+ */
+internal enum class MirrorPreset(
+    val maxSize: Int,
+    val maxFps: Int,
+    val bitRate: Int,
+    val wire: String,
+) {
+    Smooth(maxSize = 768, maxFps = 24, bitRate = 2_500_000, wire = "smooth"),
+    Light(maxSize = 512, maxFps = 12, bitRate = 1_000_000, wire = "light"),
+    ;
+
+    fun fitsEncoder(): Boolean {
+        val height = maxSize * 9 / 16
+        return maxSize % 16 == 0 && height % 16 == 0
+    }
+
+    companion object {
+        fun fromStored(value: String?): MirrorPreset {
+            return entries.firstOrNull { it.wire == value } ?: Smooth
+        }
+    }
+}
+
+/**
+ * Light while the TV is playing, unless the user just picked a preset.
+ * After playback has been stopped, an automatic Light switch returns to Smooth.
+ */
+internal fun mirrorPresetWhilePlaying(
+    saved: MirrorPreset,
+    videoPlaying: Boolean,
+    userOverride: Boolean,
+): MirrorPreset {
+    if (videoPlaying && !userOverride) return MirrorPreset.Light
+    return saved
+}
+
+internal fun mirrorPresetAfterPlayback(saved: MirrorPreset, autoSwitchedToLight: Boolean): MirrorPreset {
+    return if (autoSwitchedToLight) MirrorPreset.Smooth else saved
 }
 
 internal data class ControlMsg(val action: Int, val payload: ByteArray)

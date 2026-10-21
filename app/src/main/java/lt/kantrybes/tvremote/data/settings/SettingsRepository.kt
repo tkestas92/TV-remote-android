@@ -9,7 +9,10 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import lt.kantrybes.tvremote.data.remote.InvalidTvAddressException
+import lt.kantrybes.tvremote.data.remote.TvAddress
 import lt.kantrybes.tvremote.data.remote.WakeOnLan
+import lt.kantrybes.tvremote.data.scrcpy.MirrorPreset
 
 internal data class SettingsSnapshot(
     val tvIp: String,
@@ -44,6 +47,27 @@ internal class SettingsRepository(private val context: Context) {
     suspend fun setPairedHost(host: String) {
         context.settingsDataStore.edit { prefs ->
             prefs[Keys.PAIRED_HOST] = host.trim()
+        }
+    }
+
+    suspend fun launcherToken(host: String): String? {
+        val key = Keys.launcherToken(host) ?: return null
+        return context.settingsDataStore.data.first()[key]?.takeIf { it.isNotBlank() }
+    }
+
+    suspend fun setLauncherToken(host: String, token: String) {
+        val key = Keys.launcherToken(host) ?: return
+        val value = token.trim()
+        if (value.isEmpty()) return
+        context.settingsDataStore.edit { prefs ->
+            prefs[key] = value
+        }
+    }
+
+    suspend fun clearLauncherToken(host: String) {
+        val key = Keys.launcherToken(host) ?: return
+        context.settingsDataStore.edit { prefs ->
+            prefs.remove(key)
         }
     }
 
@@ -89,6 +113,30 @@ internal class SettingsRepository(private val context: Context) {
     suspend fun setShowMediaControls(show: Boolean) {
         context.settingsDataStore.edit { prefs ->
             prefs[Keys.SHOW_MEDIA_CONTROLS] = show
+        }
+    }
+
+    fun mirrorFullscreen(): Flow<Boolean> {
+        return context.settingsDataStore.data.map { prefs ->
+            prefs[Keys.MIRROR_FULLSCREEN] ?: false
+        }
+    }
+
+    suspend fun setMirrorFullscreen(fullscreen: Boolean) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[Keys.MIRROR_FULLSCREEN] = fullscreen
+        }
+    }
+
+    fun mirrorPreset(): Flow<MirrorPreset> {
+        return context.settingsDataStore.data.map { prefs ->
+            MirrorPreset.fromStored(prefs[Keys.MIRROR_PRESET])
+        }
+    }
+
+    suspend fun setMirrorPreset(preset: MirrorPreset) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[Keys.MIRROR_PRESET] = preset.wire
         }
     }
 
@@ -169,6 +217,8 @@ internal class SettingsRepository(private val context: Context) {
         val SHORTCUTS = stringPreferencesKey("shortcuts")
         val SHOW_PICTURE_MENU = booleanPreferencesKey("show_picture_menu_button")
         val SHOW_MEDIA_CONTROLS = booleanPreferencesKey("show_media_controls")
+        val MIRROR_FULLSCREEN = booleanPreferencesKey("mirror_fullscreen")
+        val MIRROR_PRESET = stringPreferencesKey("mirror_preset")
         val CONTROL_MODE = stringPreferencesKey("control_mode")
 
         fun sliderShown(item: String) = booleanPreferencesKey("picture_show_$item")
@@ -176,6 +226,12 @@ internal class SettingsRepository(private val context: Context) {
         fun sliderValue(item: String) = intPreferencesKey("picture_value_$item")
 
         fun launcherComponent(packageName: String) = stringPreferencesKey("launcher_component_$packageName")
+
+        fun launcherToken(host: String) = try {
+            stringPreferencesKey("launcher_token_${TvAddress.requireIpv4(host)}")
+        } catch (_: InvalidTvAddressException) {
+            null
+        }
     }
 
     private companion object {

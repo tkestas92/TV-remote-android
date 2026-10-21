@@ -29,12 +29,26 @@ android {
             }
         }
     }
+    flavorDimensions += "mode"
+    productFlavors {
+        create("full") {
+            dimension = "mode"
+            buildConfigField("boolean", "IS_DEMO", "false")
+        }
+        create("demo") {
+            dimension = "mode"
+            applicationIdSuffix = ".demo"
+            versionNameSuffix = "-demo"
+            buildConfigField("boolean", "IS_DEMO", "true")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {
@@ -74,7 +88,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.protobuf.kotlin.lite)
     implementation(libs.bouncycastle.bcpkix)
-    implementation(libs.dadb)
+    "fullImplementation"(libs.dadb)
     implementation(libs.androidx.media)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

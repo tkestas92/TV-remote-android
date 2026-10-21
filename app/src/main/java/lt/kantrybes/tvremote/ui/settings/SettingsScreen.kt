@@ -1,5 +1,6 @@
 package lt.kantrybes.tvremote.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,6 +16,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -35,6 +38,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -45,7 +49,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import lt.kantrybes.tvremote.BuildConfig
 import lt.kantrybes.tvremote.R
+import lt.kantrybes.tvremote.ui.demo.DemoChip
 import lt.kantrybes.tvremote.data.settings.ControlMode
 import lt.kantrybes.tvremote.data.settings.PictureSlider
 import lt.kantrybes.tvremote.ui.LocalNetworkAccess
@@ -55,13 +61,15 @@ import lt.kantrybes.tvremote.ui.LocalNetworkDeniedMessage
 @Composable
 internal fun SettingsScreen(
     network: LocalNetworkAccess,
-    onOpenRemote: () -> Unit,
+    onClose: () -> Unit,
     viewModel: SettingsViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    BackHandler(onBack = onClose)
     SettingsContent(
         state = state,
         network = network,
+        onClose = onClose,
         onTvIpChange = viewModel::onTvIpChange,
         onTvMacChange = viewModel::onTvMacChange,
         onTestConnection = { network.request(viewModel::testConnection) },
@@ -69,7 +77,6 @@ internal fun SettingsScreen(
         onCodeChange = viewModel::onCodeChange,
         onSubmitCode = viewModel::submitCode,
         onCancelPairing = viewModel::cancelPairing,
-        onOpenRemote = onOpenRemote,
         onShowPictureMenuChange = viewModel::setShowPictureMenuButton,
         onShowMediaControlsChange = viewModel::setShowMediaControls,
         onControlModeChange = viewModel::setControlMode,
@@ -89,7 +96,7 @@ internal fun SettingsContent(
     onCodeChange: (String) -> Unit,
     onSubmitCode: () -> Unit,
     onCancelPairing: () -> Unit,
-    onOpenRemote: () -> Unit,
+    onClose: () -> Unit,
     onShowPictureMenuChange: (Boolean) -> Unit,
     onShowMediaControlsChange: (Boolean) -> Unit,
     onControlModeChange: (ControlMode) -> Unit,
@@ -100,7 +107,30 @@ internal fun SettingsContent(
     val canAct = state.prefsLoaded && state.tvIp.isNotBlank() && !busy
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.open_settings)) })
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onClose()
+                        },
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_arrow_back),
+                            contentDescription = stringResource(R.string.launcher_back),
+                        )
+                    }
+                },
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(stringResource(R.string.open_settings))
+                        DemoChip()
+                    }
+                },
+            )
         },
     ) { innerPadding ->
         Column(
@@ -118,7 +148,17 @@ internal fun SettingsContent(
             if (network.denied && !network.granted) {
                 LocalNetworkDeniedMessage(network)
             }
-            OutlinedTextField(
+            if (BuildConfig.IS_DEMO) {
+                Text(
+                    text = stringResource(R.string.demo_build),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    text = stringResource(R.string.demo_tv_name),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
+            if (!BuildConfig.IS_DEMO) OutlinedTextField(
                 value = state.tvIp,
                 onValueChange = onTvIpChange,
                 modifier = Modifier.fillMaxWidth(),
@@ -131,7 +171,7 @@ internal fun SettingsContent(
                     imeAction = ImeAction.Done,
                 ),
             )
-            OutlinedTextField(
+            if (!BuildConfig.IS_DEMO) OutlinedTextField(
                 value = state.tvMac,
                 onValueChange = onTvMacChange,
                 modifier = Modifier.fillMaxWidth(),
@@ -186,11 +226,6 @@ internal fun SettingsContent(
                             if (state.isPaired) R.string.pair_again else R.string.pair,
                         ),
                     )
-                }
-            }
-            if (state.pairedHost.isNotBlank()) {
-                TextButton(onClick = onOpenRemote, modifier = Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.open_remote))
                 }
             }
             Text(
@@ -264,6 +299,7 @@ internal fun SettingsContent(
                 text = PairingStatus(state),
                 color = when {
                     state.pairingState is PairingState.Failed -> MaterialTheme.colorScheme.error
+                    state.credentialsRejected -> MaterialTheme.colorScheme.error
                     state.isPaired || state.pairingState is PairingState.Succeeded ->
                         MaterialTheme.colorScheme.primary
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -386,10 +422,10 @@ private fun PairingStatus(state: SettingsUiState): String {
         PairingState.WaitingForCode, PairingState.SubmittingCode ->
             stringResource(R.string.status_waiting_for_code)
         is PairingState.Failed -> pairing.message
-        PairingState.Succeeded, PairingState.Idle -> if (state.isPaired) {
-            stringResource(R.string.status_paired)
-        } else {
-            stringResource(R.string.status_not_paired)
+        PairingState.Succeeded, PairingState.Idle -> when {
+            state.credentialsRejected -> stringResource(R.string.pairing_rejected)
+            state.isPaired -> stringResource(R.string.status_paired)
+            else -> stringResource(R.string.status_not_paired)
         }
     }
 }

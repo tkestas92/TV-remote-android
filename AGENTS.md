@@ -10,13 +10,31 @@ phase until the current one builds and runs on the phone.
 |---|---|
 | Model | TCL BeyondTV, Realtek SoC (platform V8-R851T02) |
 | OS | Android TV 9 (API 28), security patch 2020-09 |
-| LAN IP | configurable in the app, never hardcode |
+| LAN IP | 192.168.0.61 (make it configurable, never hardcode) |
 | ADB | Network ADB on port 5555 works; first connect needs "Allow" on TV |
 | `adb shell input keyevent` | **~2.5 s per call — too slow, never use for buttons** |
-| App launch via `monkey -p <pkg> -c android.intent.category.LEANBACK_LAUNCHER 1` | works |
+| App launch via `monkey -p <pkg> -c android.intent.category.LEANBACK_LAUNCHER 1` | works but **slow (~2.7–3.3 s even on a warm ADB connection)** — monkey starts a Java VM. Prefer `am start -n <pkg>/<activity>` with the activity resolved once via `cmd package resolve-activity --brief -c android.intent.category.LEANBACK_LAUNCHER <pkg>` and cached |
 | YouTube deep link `am start -a android.intent.action.VIEW -d <url> com.google.android.youtube.tv` | works |
 | scrcpy 4.1 mirroring | works incl. YouTube video, 1280x720; no audio (Android < 11) |
 | Google Home app remote | works fast → Android TV Remote protocol v2 is available |
+| Remote protocol ports | 6466 + 6467 open; pairing and command session work from the phone |
+| `RemoteAppLinkLaunchRequest` | **not supported** — TV closes the :6466 session within ~25 ms. Keep `supportsAppLinks=false` |
+| App launch from the phone | via ADB (dadb), warm connection, persisted RSA key (TV asked "Allow" once) |
+| targetSdk 37 (Android 17) | LAN connections time out without the `ACCESS_LOCAL_NETWORK` runtime permission |
+| Android background | LAN sockets are aborted when the app is backgrounded → stop session on ON_STOP, reconnect on ON_START |
+| TCL picture menu (contrast etc.) | `am start -n com.tcl.settings/.MainActivity` (no physical key needed) |
+| Direct contrast API | **not possible without root.** Chain: TTvPictureManager → TvVideoApi.setVideoCfg(CFG_TYPE_CONTRAST) → libcom_tcl_tv_jni.so → `/dev/sbinder`; SELinux denies the shell domain (`avc: denied { map } … sbinder_device`). No Android setting, no binder service (ITclTvService has 3 methods, ITVKitService none for picture). → Use the TCL settings intent below instead. |
+| **Set a picture value (WORKS)** | `am force-stop com.tcl.settings` then `am startservice -n com.tcl.settings/.ShowWindowService -a com.tcl.settings.SHOW_WINDOW --es Type Settings --es ITEM contrast --es MOTION SET --es MOTION_VALUE 70` → TV shows its own "Contrast 70" slider and applies it. This is TCL's voice-assistant path (ShowWindowService → SeekBarLayoutDialog.setIntentMotion). MOTION can also be `UP`/`DOWN` (relative, MOTION_VALUE = step). The force-stop is needed, otherwise an already-open settings dialog is re-shown and the extras are ignored. |
+| Other ITEM names (same mechanism, from setting_config.json) | `brightness` (backlight — **verified working, this is the main slider the user wants**), `color_saturation`, `sharpness`, `hue`, `gamma`, `pic_black_level`, `soundbalance`, `digital_audio_output_delay` |
+| Standby | TV stays on Wi-Fi, :6466 reachable; Power key via Remote protocol wakes it |
+| TV Wi-Fi MAC | 44:d8:78:15:c8:f2 (configurable in Settings) |
+| Reconnect (implemented) | connect timeout 3 s, TLS 5 s, WoL magic packet before every attempt, fixed 2 s retry while foreground, restart on ON_START / Wi-Fi onAvailable, 12 s without any message → reconnect. Short-standby test: connect ok in 0.2–0.6 s on attempt 1. **Long standby (30+ min) not yet verified.** |
+| ADB with 2 devices | always target the TV explicitly: `adb -s 192.168.0.61:5555 ...` |
+| In-app mirror (scrcpy 4.1) | works at 1280x720; starts in ~5 s |
+| Video encoders on the TV (`list_encoders=true`, verified) | **only software**: `OMX.google.h264.encoder`, `OMX.google.vp8.encoder`, `OMX.google.vp9.encoder`. No hardware encoder is exposed. Do not run list_encoders at runtime (costs ~3 s); always use h264 with low settings. |
+| Mirror resolution | with the software encoder use sizes where **both width and height are multiples of 16** (e.g. `max_size=768` → 768x432, or 1024 → 1024x576). With `max_size=854` the server died with "Aborted" (suspected encoder alignment crash) |
+| Server start command (WORKS) | `export CLASSPATH=/data/local/tmp/scrcpy-server.jar; app_process / com.genymobile.scrcpy.Server 4.1 scid=<scid> tunnel_forward=true audio=false control=true max_size=768 video_bit_rate=2500000 max_fps=24 video_codec=h264`. Kill old servers in a **separate** shell call with `pkill -f 'scrcpy-serve[r]'` (a plain `pkill -f scrcpy-server` in the same command kills the command itself). Skip the jar push if the size matches. |
+| scrcpy control socket | **every write must be off the Main thread** (NetworkOnMainThreadException otherwise, touches silently lost) |
 
 App packages:
 
@@ -53,6 +71,13 @@ Rules:
 - Protobuf-lite (`com.google.protobuf:protobuf-kotlin-lite`) for Remote protocol messages
 - DataStore for settings (TV IP, paired cert, shortcuts)
 - minSdk 29, targetSdk latest
+
+## Status (2026-09-24)
+
+- **Phase 1: DONE.** Pairing, remote session (D-pad + Swipe modes), power incl. wake from standby, app shortcuts via ADB.
+- **Extra: DONE.** Separate "Nustatymai" screen (choose/reorder shortcuts, D-pad/Swipe, picture-menu button toggle) that never re-pairs; "TV ryšys" screen is the only place pairing can start.
+- **Phase 2: keyboard + Share → TV DONE.**
+- **Next:** picture sliders via the TCL settings intent (see Verified facts), replacing menu automation.
 
 ## Phase 1 — MVP remote
 

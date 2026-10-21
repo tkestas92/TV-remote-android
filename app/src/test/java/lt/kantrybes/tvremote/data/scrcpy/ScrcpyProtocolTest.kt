@@ -31,6 +31,49 @@ class ScrcpyProtocolTest {
     }
 
     @Test
+    fun lightPresetUsesTheSmallerEncoderSize() {
+        val command = ScrcpyProtocol.serverCommand("0abc1234", MirrorPreset.Light)
+
+        assertTrue(command.contains("max_size=512"))
+        assertTrue(command.contains("video_bit_rate=1000000"))
+        assertTrue(command.contains("max_fps=12"))
+        assertTrue(command.contains("video_codec=h264"))
+        assertTrue(MirrorPreset.Smooth.fitsEncoder())
+        assertTrue(MirrorPreset.Light.fitsEncoder())
+        assertEquals(MirrorPreset.Smooth, MirrorPreset.fromStored(null))
+        assertEquals(MirrorPreset.Light, MirrorPreset.fromStored("light"))
+        assertEquals(MirrorPreset.Light, mirrorPresetWhilePlaying(MirrorPreset.Smooth, videoPlaying = true, userOverride = false))
+        assertEquals(MirrorPreset.Smooth, mirrorPresetWhilePlaying(MirrorPreset.Smooth, videoPlaying = true, userOverride = true))
+        assertEquals(MirrorPreset.Light, mirrorPresetWhilePlaying(MirrorPreset.Light, videoPlaying = false, userOverride = false))
+        assertEquals(MirrorPreset.Smooth, mirrorPresetAfterPlayback(MirrorPreset.Smooth, autoSwitchedToLight = true))
+        assertEquals(MirrorPreset.Light, mirrorPresetAfterPlayback(MirrorPreset.Light, autoSwitchedToLight = false))
+    }
+
+    @Test
+    fun resetVideoIsTheTypeByteOnly() {
+        assertArrayEquals(byteArrayOf(17), ScrcpyProtocol.resetVideo())
+    }
+
+    @Test
+    fun idrNalIsTypeFive() {
+        val idr = byteArrayOf(0, 0, 0, 1, 0x65, 0, 1)
+        val slice = byteArrayOf(0, 0, 0, 1, 0x41, 0, 1)
+
+        assertTrue(ScrcpyProtocol.isIdrFrame(idr))
+        assertFalse(ScrcpyProtocol.isIdrFrame(slice))
+    }
+
+    @Test
+    fun jarCheckPrefersMd5AndFallsBackToSize() {
+        assertEquals("abc123abc123abc123abc123abc123ab", ScrcpyProtocol.remoteJarMd5("abc123abc123abc123abc123abc123ab  /data/local/tmp/scrcpy-server.jar"))
+        assertNull(ScrcpyProtocol.remoteJarMd5("not found"))
+        assertTrue(ScrcpyProtocol.jarIsCurrent("aa", null, "aa", 10))
+        assertFalse(ScrcpyProtocol.jarIsCurrent("bb", 10, "aa", 10))
+        assertTrue(ScrcpyProtocol.jarIsCurrent(null, 10, "aa", 10))
+        assertFalse(ScrcpyProtocol.jarIsCurrent(null, null, "aa", 10))
+    }
+
+    @Test
     fun moveEventsKeepOnlyTheLatest() {
         val down = ControlMsg(ScrcpyProtocol.ACTION_DOWN, byteArrayOf(1))
         val move1 = ControlMsg(ScrcpyProtocol.ACTION_MOVE, byteArrayOf(2))
@@ -94,6 +137,17 @@ class ScrcpyProtocolTest {
         assertEquals(0x38, message[21].toInt() and 0xFF)
         assertEquals(0xFF.toByte(), message[22])
         assertEquals(0xFF.toByte(), message[23])
+    }
+
+    @Test
+    fun mappingFollowsTheLaidOutVideoRect() {
+        assertNull(ScrcpyProtocol.mapTouch(10f, 200f, 800f, 400f, 768, 432))
+        val landscape = ScrcpyProtocol.mapTouch(400f, 200f, 800f, 400f, 768, 432)
+        assertTrue(kotlin.math.abs((landscape?.first ?: 0) - 384) <= 1)
+        assertEquals(216, landscape?.second)
+
+        assertNull(ScrcpyProtocol.mapTouch(200f, 10f, 400f, 800f, 768, 432))
+        assertEquals(384 to 216, ScrcpyProtocol.mapTouch(200f, 400f, 400f, 800f, 768, 432))
     }
 
     @Test

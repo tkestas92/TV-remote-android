@@ -23,14 +23,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-internal sealed interface RemoteConnectionState {
-    data object Disconnected : RemoteConnectionState
-    data object Connecting : RemoteConnectionState
-    data object Connected : RemoteConnectionState
-    data object Reconnecting : RemoteConnectionState
-    data object NeedsPairing : RemoteConnectionState
-}
-
 /**
  * Long-lived TLS session to the TV command port. Pings are answered on the reader
  * thread. While the app is in the foreground a dropped connection retries every
@@ -44,6 +36,7 @@ internal class RemoteSession(
     private val macAddress: suspend () -> String,
     private val consumePendingPower: () -> Boolean,
     private val onReady: () -> Unit,
+    private val onCredentialsRejected: () -> Unit = {},
 ) {
     private val _state = MutableStateFlow<RemoteConnectionState>(RemoteConnectionState.Connecting)
     val state: StateFlow<RemoteConnectionState> = _state.asStateFlow()
@@ -181,6 +174,7 @@ internal class RemoteSession(
                 val established = AtomicBoolean(false)
                 try {
                     connectAndServe(attempt, startedAt, wol, established)
+                    if (_state.value is RemoteConnectionState.NeedsPairing) return
                     connectedOnce = true
                 } catch (error: CancellationException) {
                     throw error
@@ -238,6 +232,12 @@ internal class RemoteSession(
                 onSocket = ::trackSocket,
             )
         } catch (error: CannotConnectException) {
+            if (error.kind == CannotConnectException.Kind.TLS && tlsRejectsClientCertificate(error)) {
+                Log.w(TAG, "TV rejected the stored certificate")
+                _state.value = RemoteConnectionState.NeedsPairing(rejected = true)
+                onCredentialsRejected()
+                return
+            }
             if (error.kind == CannotConnectException.Kind.TLS) {
                 Log.w(TAG, "Command TLS failed; keeping the stored certificate and reconnecting")
             }
@@ -374,4 +374,22 @@ internal class RemoteSession(
         const val LIVENESS_POLL_MS = 1_000L
         const val RETRY_INTERVAL_MS = 2_000L
     }
+}
+
+internal fun tlsRejectsClientCertificate(error: Throwable): Boolean {
+    var current: Throwable? = error
+    while (current != null) {
+        val message = current.message?.lowercase().orEmpty()
+        if (
+            message.contains("certificate_unknown") ||
+            message.contains("bad_certificate") ||
+            message.contains("unknown_ca") ||
+            message.contains("certificate unknown") ||
+            message.contains("certificate_expired")
+        ) {
+            return true
+        }
+        current = current.cause
+    }
+    return false
 }

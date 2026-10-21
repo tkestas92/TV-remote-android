@@ -26,12 +26,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import lt.kantrybes.tvremote.BuildConfig
 import lt.kantrybes.tvremote.R
 
 private const val LOCAL_NETWORK_SDK = 37
 
 internal object LocalNetwork {
-    fun isRequired(): Boolean = Build.VERSION.SDK_INT >= LOCAL_NETWORK_SDK
+    fun isRequired(): Boolean = !BuildConfig.IS_DEMO && Build.VERSION.SDK_INT >= LOCAL_NETWORK_SDK
 
     fun isGranted(context: Context): Boolean {
         if (!isRequired()) return true

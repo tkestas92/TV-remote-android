@@ -13,24 +13,23 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import lt.kantrybes.tvremote.BuildConfig
 import lt.kantrybes.tvremote.R
+import lt.kantrybes.tvremote.TvRemoteApplication
+import lt.kantrybes.tvremote.backend.TvPairing
 import lt.kantrybes.tvremote.data.remote.CannotConnectException
-import lt.kantrybes.tvremote.data.remote.ClientCertificateStore
-import lt.kantrybes.tvremote.data.remote.ConnectionTester
 import lt.kantrybes.tvremote.data.remote.InvalidPairingCodeException
 import lt.kantrybes.tvremote.data.remote.InvalidTvAddressException
 import lt.kantrybes.tvremote.data.remote.PairingProtocolException
-import lt.kantrybes.tvremote.data.remote.PairingSession
+import lt.kantrybes.tvremote.data.remote.RemoteConnectionState
 import lt.kantrybes.tvremote.data.remote.TvAddress
 import lt.kantrybes.tvremote.data.settings.ControlMode
 import lt.kantrybes.tvremote.data.settings.PictureSlider
 import lt.kantrybes.tvremote.data.settings.PictureSliderPref
 import lt.kantrybes.tvremote.data.settings.SettingsRepository
-import java.io.File
-
 internal class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val settings = SettingsRepository(application)
-    private val certificates = ClientCertificateStore(File(application.filesDir, "remote-identity"))
+    private val discovery = (application as TvRemoteApplication).discovery
 
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
@@ -41,25 +40,29 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
     private var macSaveJob: Job? = null
     private var operation: Job? = null
     private var pairingGeneration = 0
-    private var session: PairingSession? = null
+    private var session: TvPairing? = null
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
             val snapshot = settings.read()
-            val hasCertificate = withContext(Dispatchers.IO) { certificates.exists() }
-            val pairedHost = if (snapshot.pairedHost.isNotBlank() && !hasCertificate) {
-                settings.setPairedHost("")
-                ""
-            } else {
-                snapshot.pairedHost
-            }
+            val hasCertificate = discovery.hasIdentity()
             _state.update { current ->
                 current.copy(
-                    tvIp = if (ipEdited) current.tvIp else snapshot.tvIp,
+                    tvIp = when {
+                        BuildConfig.IS_DEMO -> DEMO_HOST
+                        ipEdited -> current.tvIp
+                        else -> snapshot.tvIp.ifBlank { snapshot.pairedHost }
+                    },
                     tvMac = if (macEdited) current.tvMac else snapshot.tvMac,
-                    pairedHost = pairedHost,
+                    pairedHost = snapshot.pairedHost,
+                    hasCertificate = hasCertificate,
                     prefsLoaded = true,
                 )
+            }
+        }
+        viewModelScope.launch {
+            (application as TvRemoteApplication).remote.state.collect { connection ->
+                _state.update { it.copy(remoteConnection = connection) }
             }
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -137,13 +140,17 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
             _state.update { it.copy(testState = TestState.Running) }
             try {
                 flushIp()
-                val host = TvAddress.requireIpv4(_state.value.tvIp)
-                withContext(Dispatchers.IO) { ConnectionTester.test(host) }
+                val host = requireHost()
+                withContext(Dispatchers.IO) { discovery.test(host) }
                 _state.update {
                     it.copy(
                         testState = TestState.Result(
                             success = true,
-                            message = getApplication<Application>().getString(R.string.test_success, host),
+                            message = if (BuildConfig.IS_DEMO) {
+                            getApplication<Application>().getString(R.string.connection_connected_demo)
+                        } else {
+                            getApplication<Application>().getString(R.string.test_success, host)
+                        },
                         ),
                     )
                 }
@@ -158,7 +165,7 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
         if (session != null || operation?.isActive == true) return
         Log.i(
             TAG,
-            "Pairing started from the settings button; certificateExists=${certificates.exists()}",
+            "Pairing started from the settings button; certificateExists=${discovery.hasIdentity()}",
         )
         val generation = ++pairingGeneration
         operation = viewModelScope.launch {
@@ -167,10 +174,10 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
             }
             try {
                 flushIp()
-                val host = TvAddress.requireIpv4(_state.value.tvIp)
-                val identity = withContext(Dispatchers.IO) { certificates.getOrCreate() }
-                val opened = PairingSession(host, identity)
-                withContext(Dispatchers.IO) { opened.openAndRequestCode() }
+                val host = requireHost()
+                val opened = withContext(Dispatchers.IO) {
+                    discovery.openPairing(host).also { it.openAndRequestCode() }
+                }
                 if (generation != pairingGeneration) {
                     opened.close()
                     return@launch
@@ -206,6 +213,7 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
                 _state.update {
                     it.copy(
                         pairedHost = host,
+                        hasCertificate = true,
                         pairingState = PairingState.Succeeded,
                         code = "",
                         codeError = null,
@@ -245,7 +253,11 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
 
     private suspend fun flushIp() {
         saveJob?.cancel()
-        settings.setTvIp(_state.value.tvIp)
+        if (!BuildConfig.IS_DEMO) settings.setTvIp(_state.value.tvIp)
+    }
+
+    private fun requireHost(): String {
+        return if (BuildConfig.IS_DEMO) DEMO_HOST else TvAddress.requireIpv4(_state.value.tvIp)
     }
 
     private fun messageFor(error: Exception): String {
@@ -277,6 +289,7 @@ internal class SettingsViewModel(application: Application) : AndroidViewModel(ap
     private companion object {
         const val TAG = "TvRemoteSettings"
         const val SAVE_DEBOUNCE_MS = 250L
+        const val DEMO_HOST = "demo"
     }
 }
 
@@ -284,6 +297,8 @@ internal data class SettingsUiState(
     val tvIp: String = "",
     val tvMac: String = "",
     val pairedHost: String = "",
+    val hasCertificate: Boolean = false,
+    val remoteConnection: RemoteConnectionState = RemoteConnectionState.Disconnected,
     val prefsLoaded: Boolean = false,
     val testState: TestState = TestState.Idle,
     val pairingState: PairingState = PairingState.Idle,
@@ -297,7 +312,10 @@ internal data class SettingsUiState(
     },
 ) {
     val isPaired: Boolean
-        get() = pairedHost.isNotBlank() && pairedHost == tvIp.trim()
+        get() = pairedHost.isNotBlank() && hasCertificate
+
+    val credentialsRejected: Boolean
+        get() = (remoteConnection as? RemoteConnectionState.NeedsPairing)?.rejected == true
 
     val pairingInProgress: Boolean
         get() = pairingState is PairingState.Connecting ||
