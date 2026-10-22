@@ -72,12 +72,16 @@ Rules:
 - DataStore for settings (TV IP, paired cert, shortcuts)
 - minSdk 29, targetSdk latest
 
-## Status (2026-09-24)
+## Status (2026-10-22)
 
-- **Phase 1: DONE.** Pairing, remote session (D-pad + Swipe modes), power incl. wake from standby, app shortcuts via ADB.
-- **Extra: DONE.** Separate "Nustatymai" screen (choose/reorder shortcuts, D-pad/Swipe, picture-menu button toggle) that never re-pairs; "TV ryšys" screen is the only place pairing can start.
-- **Phase 2: keyboard + Share → TV DONE.**
-- **Next:** picture sliders via the TCL settings intent (see Verified facts), replacing menu automation.
+- **Phase 1: DONE.** Pairing, remote session (button cluster and D-pad; a stored `swipe` value reads as D-pad), power, Wake-on-LAN, auto-reconnect, app shortcuts via ADB `am start` with a cached component. `supportsAppLinks` stays false unless a host is marked otherwise.
+- **Settings: DONE.** One English Settings screen (IP, pair, shortcuts, control mode, picture sliders, media-card toggle, MAC). Pairing starts only from the Pair button. The old "Nustatymai" / "TV ryšys" split is gone.
+- **Phase 2: PARTIAL.** Keyboard (Remote IME, ASCII `input text` fallback) and Share → TV are done. Now playing is a notification and lock-screen media session, not an in-app card. Scenes, sleep timer, Quick Settings tile, and home-screen widget are not implemented.
+- **Picture sliders: DONE.** Brightness (on by default), contrast, saturation, and sharpness through the TCL `ShowWindowService` intent.
+- **Phase 3: DONE.** In-app scrcpy 4.1 mirror with touch, fullscreen, Smooth/Light, and auto-Light while video plays. Audio is off. `video=false` is not implemented.
+- **Launcher: DONE.** HTTP to the Kantrybės TV launcher on port 8765 (favorites, hidden apps, wallpaper, launch, icons). No service discovery; uses the saved TV IP. The demo flavor does not call it.
+- **Demo flavor: DONE.** No sockets. Virtual TV for the remote, a fake mirror, share, and the media card.
+- **Not started:** Phase 4. NSD discovery of `_androidtvremote2._tcp` is not implemented. Long standby (30+ min) is still unverified.
 
 ## Phase 1 — MVP remote
 
